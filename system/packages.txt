@@ -10,6 +10,8 @@ python
 labwc
 quickshell
 qt6-imageformats
+libvips
+ffmpegthumbnailer
 foot
 ttf-dejavu
 ttf-jetbrains-mono-nerd

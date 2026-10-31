@@ -185,14 +185,14 @@ Item {
   function releaseNextDoneFile() {
     if (releaseProc.running || doneFilesToRelease.length === 0) return
 
-    var path = doneFilesToRelease.shift()
-    releaseProc.command = ["bash", "-c", ": > " + Util.shellQuote(path)]
+    var request = doneFilesToRelease.shift()
+    releaseProc.command = ["bash", "-c", "test -e " + Util.shellQuote(request.selection) + " && : > " + Util.shellQuote(request.done)]
     releaseProc.running = true
   }
 
   function finishDoneFile(path) {
     if (!path) return
-    doneFilesToRelease.push(path)
+    doneFilesToRelease.push({done: path, selection: selectionFile})
     releaseNextDoneFile()
   }
 
@@ -219,7 +219,7 @@ Item {
     selectionFile = ""
     doneFile = ""
 
-    applyProc.command = ["bash", "-c", "printf '%s\\n' " + Util.shellQuote(path) + " > " + Util.shellQuote(activeSelectionFile) + "; : > " + Util.shellQuote(activeDoneFile)]
+    applyProc.command = ["bash", "-c", "test -e " + Util.shellQuote(activeSelectionFile) + " && { printf '%s\\n' " + Util.shellQuote(path) + " > " + Util.shellQuote(activeSelectionFile) + "; : > " + Util.shellQuote(activeDoneFile) + "; }"]
     applyProc.running = true
   }
 
@@ -236,20 +236,20 @@ Item {
   }
 
   function closeSelector(nextDoneFile) {
+    // A departed caller must not dismiss a newer request using this host.
+    if (nextDoneFile && nextDoneFile !== doneFile) return false
     requestSerial += 1
     themeOpenPending = false
 
     if (requestActive)
       finishDoneFile(doneFile)
 
-    if (nextDoneFile && nextDoneFile !== doneFile)
-      finishDoneFile(nextDoneFile)
-
     requestActive = false
     selectionFile = ""
     doneFile = ""
     filterText = ""
     root.opened = false
+    return true
   }
 
   function loadRows(rows, reveal) {
@@ -269,7 +269,7 @@ Item {
     }
   }
 
-  function openSelector(nextImageDirs, nextImageRows, nextSelectedImage, nextSelectionFile, nextDoneFile, nextShowLabels, nextFilterable) {
+  function openSelector(nextImageDirs, nextImageRows, nextSelectedImage, nextSelectionFile, nextDoneFile, nextShowLabels, nextFilterable, rowsProvided) {
     deleteConfirmOpen = false
     pendingDeleteTheme = ""
     deleteSelectionPath = ""
@@ -300,7 +300,7 @@ Item {
       return
     }
 
-    if (imageRows) {
+    if (imageRows || rowsProvided) {
       var rowsToLoad = imageRows
       var rowsSerial = requestSerial
       imageArray = []
@@ -587,7 +587,7 @@ Item {
     var doneF = String(args.doneFile || "")
     var labels = args.showLabels === true || args.showLabels === "true"
     var filter = args.filterable === true || args.filterable === "true"
-    openSelector(dirs, rows, sel, selFile, doneF, labels, filter)
+    openSelector(dirs, rows, sel, selFile, doneF, labels, filter, Object.prototype.hasOwnProperty.call(args, "imageRows"))
   }
 
   function close() {
@@ -659,6 +659,39 @@ Item {
       interval: 400
       running: root.opened && root.imagesLoaded && !root.layoutSettled && root.imageArray.length > 0
       onTriggered: root.settleReveal()
+    }
+
+    Rectangle {
+      id: emptyState
+      visible: root.opened && root.imagesLoaded && root.imageArray.length === 0
+      anchors.centerIn: parent
+      width: Math.min(420, parent.width - 32)
+      height: 180
+      radius: 12
+      color: Commons.Color.background
+      border.color: root.foreground
+      focus: visible
+      Keys.onEscapePressed: root.cancel()
+      Keys.onReturnPressed: root.cancel()
+      onVisibleChanged: if (visible) forceActiveFocus()
+
+      Text {
+        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 20 }
+        text: "No images could be loaded. Check the image folders and thumbnail tools."
+        color: root.foreground
+        wrapMode: Text.WordWrap
+        horizontalAlignment: Text.AlignHCenter
+      }
+      Rectangle {
+        anchors { bottom: parent.bottom; horizontalCenter: parent.horizontalCenter; bottomMargin: 16 }
+        width: 120
+        height: 44
+        radius: 6
+        color: "transparent"
+        border.color: root.foreground
+        Text { anchors.centerIn: parent; text: "Close"; color: root.foreground }
+        MouseArea { anchors.fill: parent; onClicked: root.cancel() }
+      }
     }
 
     Item {
