@@ -10,6 +10,7 @@ python
 labwc
 quickshell
 qt6-imageformats
+diffutils
 libvips
 ffmpegthumbnailer
 foot

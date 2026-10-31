@@ -206,6 +206,7 @@ print(Path(os.environ['TEST_ROOT'], 'picker-pid').read_text())
 
     def test_thumbnail_dependencies_are_packaged(self):
         packages=(PROJECT/'system/packages.txt').read_text().splitlines()
+        self.assertIn('diffutils', packages)
         self.assertIn('libvips', packages)
         self.assertIn('ffmpegthumbnailer', packages)
 
