@@ -11,8 +11,9 @@ on:
         required: true
         default: v0.2.0
       hardware_run_id:
-        description: Optional exact orchard run supplying first-release components
-        required: false
+        description: Successful driver build from stuart902/orchard
+        required: true
+        default: '41541113436'
       reuse_run_id:
         description: Exact prior run supplying unchanged boot and userspace artifacts
         required: false
@@ -20,6 +21,8 @@ permissions:
   contents: read
   actions: read
 env:
+  ORCHARD_REPOSITORY: stuart902/orchard
+  ORCHARD_REF: 40c1511a5588440a7130d2acc8f9297f069e6934
   HARDWARE_TAG: ${{ inputs.hardware_tag || 'v0.2.0' }}
   HARDWARE_ARTIFACT_DIR: ${{ inputs.hardware_run_id != '' && 'out/downloads/hardware' || '' }}
 jobs:
@@ -45,11 +48,25 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: ci/release-notes "$TAG" >/dev/null
-      # Tests follow orchard main; builds use the pinned orchard release (ci/dependencies).
-      - name: Install orchard main
-        run: bash ci/dependencies --tools-only
+      - name: Refuse release tags on this driver-test branch
+        if: github.ref_type == 'tag'
+        run: echo 'Use workflow_dispatch on test/j71b-poweroff; this branch does not publish releases.' >&2; exit 1
+      - name: Verify the selected driver build
+        if: github.event_name == 'workflow_dispatch'
         env:
-          ORCHARD_REF: main
+          GH_TOKEN: ${{ github.token }}
+          HARDWARE_RUN_ID: ${{ inputs.hardware_run_id }}
+        run: |
+          [[ "$HARDWARE_RUN_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$ORCHARD_REPOSITORY/actions/runs/$HARDWARE_RUN_ID" > hardware-run.json
+          python - <<'PYTHON'
+          import json, os
+          run = json.load(open('hardware-run.json'))
+          assert run['head_sha'] == os.environ['ORCHARD_REF'], 'Driver build revision does not match the tools'
+          assert run['status'] == 'completed' and run['conclusion'] == 'success', 'Driver build must finish successfully first'
+          PYTHON
+      - name: Install the matching Orchard tools
+        run: bash ci/dependencies --tools-only
       - run: .venv/bin/python -m unittest discover -s tests -v
   # Pongo is not built here: releases ship hardware's one Pongo (quiet/pongo.bin).
   artwork:
@@ -182,14 +199,14 @@ jobs:
           HARDWARE_RUN_ID: ${{ inputs.hardware_run_id }}
         run: |
           [[ "$HARDWARE_RUN_ID" =~ ^[0-9]+$ ]]
-          gh run watch "$HARDWARE_RUN_ID" --repo OrchardLinux/orchard --interval 20 --exit-status
+          gh run watch "$HARDWARE_RUN_ID" --repo "$ORCHARD_REPOSITORY" --interval 20 --exit-status
       - name: Reuse verified first-release components
         if: inputs.hardware_run_id != ''
         uses: actions/download-artifact@v4
         with:
           name: orchard-release-assets
           path: out/downloads/hardware
-          repository: OrchardLinux/orchard
+          repository: ${{ env.ORCHARD_REPOSITORY }}
           run-id: ${{ inputs.hardware_run_id }}
           github-token: ${{ github.token }}
       - run: bash ci/dependencies
@@ -226,7 +243,13 @@ jobs:
           # The installer: install.sh and orchard-install.pyz with orchard's launch loaders.
           python -m orchard.installer release out/release \
             --pongo "$tools/quiet/pongo.bin" --m1n1 "$tools/quiet/m1n1.bin"
-          python -m release.publish --tag "$TAG" --release-dir out/release --output out/publication
+          if [[ "$REF_TYPE" == tag ]]; then
+            python -m release.publish --tag "$TAG" --release-dir out/release --output out/publication
+          else
+            # Keep local receipts for a downloadable installer; no release tag is published.
+            mkdir -p out/publication
+            cp -a out/release/. out/publication/
+          fi
           cp out/release/rootfs.json out/release/build-receipt.json out/publication/
           git archive --format=tar.gz -o out/publication/omarchy-linux-source.tar.gz HEAD
           (cd out/publication && sha256sum ./* > ../SHA256SUMS && mv ../SHA256SUMS .)

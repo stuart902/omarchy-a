@@ -7,22 +7,43 @@ set -euo pipefail
 }
 # A build uses the orchard release it pins whole: its tools (loader, platform
 # layer, defaults, recovery) and its compiled components come from the same
-# tag. Tests set ORCHARD_REF=main. The release receipt records the commit.
+# tag or explicit commit. The release receipt records the commit.
 ref=${ORCHARD_REF:-$HARDWARE_TAG}
+repository=${ORCHARD_REPOSITORY:-OrchardLinux/orchard}
+[[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+  echo 'Expected an owner/repository for Orchard' >&2; exit 2;
+}
 if [[ ! -f .orchard/pyproject.toml ]]; then
-  git clone --quiet --depth 1 --branch "$ref" https://github.com/OrchardLinux/orchard.git .orchard
+  [[ ! -e .orchard ]] || { echo '.orchard exists but is not a usable checkout' >&2; exit 2; }
+  git init --quiet .orchard
+  git -C .orchard remote add origin "https://github.com/$repository.git"
+  git -C .orchard fetch --quiet --depth 1 origin "$ref"
+  git -C .orchard checkout --quiet --detach FETCH_HEAD
 fi
-echo "orchard $(git -C .orchard rev-parse HEAD)"
+[[ "$(git -C .orchard remote get-url origin)" == "https://github.com/$repository.git" ]] || {
+  echo '.orchard comes from a different repository; use a fresh checkout' >&2; exit 2;
+}
+revision=$(git -C .orchard rev-parse HEAD)
+if [[ "$ref" =~ ^[0-9a-f]{40}$ && "$revision" != "$ref" ]]; then
+  echo '.orchard does not match the requested commit; use a fresh checkout' >&2; exit 2;
+fi
+[[ -z "$(git -C .orchard status --porcelain)" ]] || {
+  echo '.orchard has local changes; use a clean checkout' >&2; exit 2;
+}
+echo "orchard $revision"
 python3 -m venv .venv
 # validate: the JSON schemas, which release CI checks every manifest against.
 .venv/bin/python -m pip install -e './.orchard[validate]'
 .venv/bin/python -m pip check
 if [[ "${1:-}" == --tools-only ]]; then exit 0; fi
 [[ $# == 0 ]] || { echo 'Usage: ci/dependencies [--tools-only]' >&2; exit 2; }
+if [[ "$ref" =~ ^[0-9a-f]{40}$ && -z "${HARDWARE_ARTIFACT_DIR:-}" ]]; then
+  echo 'An explicit Orchard commit requires its matching build artifacts' >&2; exit 2;
+fi
 mkdir -p out/downloads
 # One component bundle per platform: its kernel, modules and DTBs, and the shared tools.
 platforms=$(.venv/bin/python -c 'from orchard.image.platform import platforms; print(*platforms())')
-base="https://github.com/OrchardLinux/orchard/releases/download/$HARDWARE_TAG"
+base="https://github.com/$repository/releases/download/$HARDWARE_TAG"
 if [[ -n "${HARDWARE_ARTIFACT_DIR:-}" ]]; then
   cp "$HARDWARE_ARTIFACT_DIR/SHA256SUMS" out/downloads/
 else
