@@ -11,10 +11,10 @@ MENU = PROJECT / 'desktop/shell/default/omarchy/omarchy-menu.jsonc'
 
 
 class MenuShutdownTests(unittest.TestCase):
-    def test_shutdown_requests_normal_system_poweroff(self):
-        entry = re.search(r'"system\.shutdown":\s*(\{[^\n]+\})', MENU.read_text())
+    def check_system_action(self, name, verb):
+        entry = re.search(r'"system\.' + name + r'":\s*(\{[^\n]+\})', MENU.read_text())
         action = json.loads(entry.group(1))['action']
-        self.assertEqual(action, 'systemctl poweroff')
+        self.assertEqual(action, 'systemctl ' + verb)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             command = root / 'systemctl'
@@ -28,9 +28,15 @@ class MenuShutdownTests(unittest.TestCase):
                            'TEST_STATUS': str(status)}
                     result = subprocess.run(['/bin/bash', '-c', action], env=env,
                                             capture_output=True, text=True, timeout=5)
-                    self.assertEqual(log.read_text(), 'poweroff\n')
+                    self.assertEqual(log.read_text(), verb + '\n')
                     self.assertEqual(result.returncode, status)
                     self.assertIn('test diagnostic', result.stderr)
+
+    def test_shutdown_requests_normal_system_poweroff(self):
+        self.check_system_action('shutdown', 'poweroff')
+
+    def test_reboot_requests_normal_system_reboot(self):
+        self.check_system_action('reboot', 'reboot')
 
 
 if __name__ == '__main__':
