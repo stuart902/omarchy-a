@@ -1,0 +1,36 @@
+name: J71b capture processing experiment
+on:
+  pull_request:
+    paths:
+      - 'experiments/j71b-capture/**'
+      - '.github/workflows/j71b-capture-experiment.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  headless-spa:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+    timeout-minutes: 10
+    steps:
+      - name: Install isolated test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential ladspa-sdk python3-numpy \
+            libpipewire-0.3-0t64 libspa-0.2-modules
+          dpkg-query -W libpipewire-0.3-0t64 libspa-0.2-modules ladspa-sdk
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build and exercise the real installed SPA graph
+        working-directory: experiments/j71b-capture
+        run: |
+          make test
+          make sanitize
+          python3 spa_graph.py
+          python3 fixture_config.py build/j71b-capture.so > build/fixture.conf
