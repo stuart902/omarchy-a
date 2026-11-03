@@ -38,14 +38,17 @@ jobs:
       - name: Package opt-in native ARM hardware test
         if: matrix.runner == 'ubuntu-24.04-arm'
         working-directory: experiments/j71b-capture
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           test "$(uname -m)" = aarch64
+          printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
           mkdir -p build/j71b-microphone-test
           cp build/j71b-capture.so build/test-capture hardware_test.py \
             HARDWARE-TEST.md capture.c test_capture.c build/j71b-microphone-test/
           {
             printf 'Repository: https://github.com/stuart902/omarchy-a\n'
-            printf 'Source commit: %s\n' "$(git rev-parse HEAD)"
+            printf 'Source commit: %s\n' "$SOURCE_COMMIT"
             printf 'Architecture: %s\n' "$(uname -m)"
             printf 'Build environment: Debian trixie; native ARM64\n'
             printf 'No tablet or daemon lifecycle test has run in CI.\n'
