@@ -1,0 +1,246 @@
+name: J71b poweroff installer (no release)
+on:
+  push:
+    branches: [test/j71b-poweroff-ci-nov3]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  HARDWARE_TAG: v0.2.0
+  HARDWARE_ARTIFACT_DIR: out/downloads/hardware
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Validate release tag
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: '[[ "$TAG" =~ ^v[A-Za-z0-9][A-Za-z0-9._-]*$ ]]'
+      - name: Check release notes
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: ci/release-notes "$TAG" >/dev/null
+      # Tests follow orchard main; builds use the pinned orchard release (ci/dependencies).
+      - name: Checkout exact Orchard source
+        uses: actions/checkout@v4
+        with:
+          repository: stuart902/orchard
+          ref: 6b5fca68c56868651113ede0063a3061d0b22914
+          path: .orchard
+          persist-credentials: false
+      - name: Install orchard main
+        run: bash ci/dependencies --tools-only
+        env:
+          ORCHARD_REF: main
+      - run: .venv/bin/python -m unittest discover -s tests -v
+  # Pongo is not built here: releases ship hardware's one Pongo (quiet/pongo.bin).
+  artwork:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: brew install imagemagick librsvg
+      - name: Generate the boot artwork, data for orchard's m1n1
+        run: |
+          python boot/generate-logo.py --size 480 --output out/boot/omarchy-logo.h
+          python boot/build-artwork --logo-header out/boot/omarchy-logo.h --output out/boot/artwork
+          tar -C out -czf out/boot-inputs.tar.gz boot
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-boot-inputs
+          path: out/boot-inputs.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 2
+  userspace:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    container: docker.io/arch4edu/archlinuxarm@sha256:1db43d1af9917db5fd34af3dab64e2b229a21240e81bb765e3d2d3c34739d587
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      ORCHARD_BUILD_NATIVE: '1'
+      ORCHARD_BUILD_ENV_ID: archlinuxarm-1db43d1-desktop-and-system
+      HARDWARE_TAG: v0.2.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the same signed-package toolchains as local builds
+        run: |
+          bash desktop/install-toolchain
+          bash desktop/labwc/install-toolchain
+          bash system/install-toolchain
+      - name: Checkout exact Orchard source
+        uses: actions/checkout@v4
+        with:
+          repository: stuart902/orchard
+          ref: 6b5fca68c56868651113ede0063a3061d0b22914
+          path: .orchard
+          persist-credentials: false
+      - name: Install pinned Orchard tools
+        run: |
+          bash ci/dependencies --tools-only
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+          useradd --create-home --uid 2000 builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+      - name: Build source components as an unprivileged user
+        run: |
+          runuser -u builder -- env PATH="$PATH" ORCHARD_BUILD_NATIVE=1 ORCHARD_BUILD_ENV_ID="$ORCHARD_BUILD_ENV_ID" \
+            ORCHARD_CHECKOUT="$GITHUB_WORKSPACE/.orchard" \
+            python desktop/build --output out/desktop
+          runuser -u builder -- env PATH="$PATH" ORCHARD_BUILD_NATIVE=1 ORCHARD_BUILD_ENV_ID="$ORCHARD_BUILD_ENV_ID" \
+            ORCHARD_CHECKOUT="$GITHUB_WORKSPACE/.orchard" \
+            python desktop/build-cursor-helper --output out/cursor
+          runuser -u builder -- env PATH="$PATH" ORCHARD_BUILD_NATIVE=1 ORCHARD_BUILD_ENV_ID="$ORCHARD_BUILD_ENV_ID" \
+            ORCHARD_CHECKOUT="$GITHUB_WORKSPACE/.orchard" \
+            python desktop/build-bluetooth-tools --output out/bluetooth
+          runuser -u builder -- env PATH="$PATH" ORCHARD_BUILD_NATIVE=1 ORCHARD_BUILD_ENV_ID="$ORCHARD_BUILD_ENV_ID" \
+            ORCHARD_CHECKOUT="$GITHUB_WORKSPACE/.orchard" \
+            python desktop/build-labwc --output out/labwc
+      - name: Build the signed Arch root filesystem
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          VERSION="preview-$RUN_ID"
+          if [[ "$REF_TYPE" == tag ]]; then VERSION="${REF_NAME#v}"; fi
+          bash system/build-rootfs --desktop out/desktop --release "$VERSION" --output out/base
+          tar -C out -czf out/omarchy-userspace.tar.gz base cursor bluetooth labwc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-userspace
+          path: out/omarchy-userspace.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 2
+  assets:
+    needs: [test, artwork, userspace]
+    env:
+      # orchard's producers run as commands from this snapshot (ci/dependencies clones it).
+      ORCHARD_CHECKOUT: ${{ github.workspace }}/.orchard
+      HARDWARE_TAG: v0.2.0
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: omarchy-*
+          path: out/downloads
+          merge-multiple: true
+      - run: sudo apt-get update && sudo apt-get install -y zstd
+      - name: Await the exact hardware run without rebuilding components
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HARDWARE_RUN_ID: 41579299652
+        run: |
+          [[ "$HARDWARE_RUN_ID" =~ ^[0-9]+$ ]]
+          gh run watch "$HARDWARE_RUN_ID" --repo stuart902/orchard --interval 20 --exit-status
+      - name: Reuse verified first-release components
+        uses: actions/download-artifact@v4
+        with:
+          name: orchard-release-assets
+          path: out/downloads/hardware
+          repository: stuart902/orchard
+          run-id: 41579299652
+          github-token: ${{ github.token }}
+      - name: Checkout exact Orchard source
+        uses: actions/checkout@v4
+        with:
+          repository: stuart902/orchard
+          ref: 6b5fca68c56868651113ede0063a3061d0b22914
+          path: .orchard
+          persist-credentials: false
+      - name: Verify exact hardware artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh api repos/stuart902/orchard/actions/runs/41579299652 --jq .head_sha)" = "498d90a683750b0826fad69be3d36626c3a0eb34"
+          (cd out/downloads/hardware && sha256sum --check --strict SHA256SUMS)
+          test "$(cat out/downloads/hardware/test-kernel-commit.txt)" = "8e7c716c14700920c9ed6bfe150adcaae4887c1b"
+          test "$(cat out/downloads/hardware/test-orchard-commit.txt)" = "498d90a683750b0826fad69be3d36626c3a0eb34"
+          test "$(cat out/downloads/hardware/test-orchard-base.txt)" = "6b5fca68c56868651113ede0063a3061d0b22914"
+      - run: bash ci/dependencies
+      - name: Assemble, audit and stage hosted assets
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          . .venv/bin/activate
+          tar -xzf out/downloads/omarchy-userspace.tar.gz -C out
+          python ci/normalize-recovery-tools.py --archive out/base/rootfs.tar.gz --receipt out/base/rootfs.tar.gz.json
+          tar -xzf out/downloads/boot-inputs.tar.gz -C out
+          VERSION="preview-$RUN_ID"
+          TAG="v$VERSION"
+          if [[ "$REF_TYPE" == tag ]]; then TAG="$REF_NAME"; VERSION="${TAG#v}"; fi
+          # Every platform's kernel from orchard's bundles; the shared tools are in each.
+          kernels=()
+          for bundle in out/platforms/*/components; do
+            kernels+=(--kernel-dir "$(basename "$(dirname "$bundle")")=$bundle/kernel")
+          done
+          tools=out/platforms/apple-16k/components
+          # What orchard supplies, as the same inputs file a local build gets; with every
+          # component given from the release bundles, nothing is fetched or built.
+          PYTHONPATH="$ORCHARD_CHECKOUT/src" python -m orchard.inputs --output out/inputs.json "${kernels[@]}" \
+            --m1n1 "$tools/quiet/m1n1.bin" --pongo "$tools/quiet/pongo.bin" --tools "$tools/boot"
+          shared() { python -c 'import json, sys; print(json.load(open("out/inputs.json"))["shared"][sys.argv[1]])' "$1"; }
+          tool() { python -c 'import json, sys; print(json.load(open("out/inputs.json"))["shared"]["tools"][sys.argv[1]])' "$1"; }
+          python -m release.build --release "$VERSION" --inputs out/inputs.json \
+            --base out/base/rootfs.tar.gz --base-receipt out/base/rootfs.tar.gz.json \
+            --loader "$(shared m1n1)" --splash out/boot/artwork/splash \
+            --logo out/boot/artwork/logo.bin --pongo "$(shared pongo)" \
+            --busybox "$(tool busybox)" --dropbear "$(tool dropbear)" \
+            --dropbearkey "$(tool dropbearkey)" --wpa-supplicant "$(tool wpa_supplicant)" \
+            --wpa-cli "$(tool wpa_cli)" --iw "$(tool iw)" \
+            --cursor-tools out/cursor --bluetooth-tools out/bluetooth --labwc-tools out/labwc \
+            --output out/release
+          python -m release.audit out/release/release.toml
+          python -m orchard.manifests --verify-local out/release/index.toml
+          # The installer: install.sh and orchard-install.pyz with orchard's launch loaders.
+          python -m orchard.installer release out/release \
+            --pongo "$tools/quiet/pongo.bin" --m1n1 "$tools/quiet/m1n1.bin"
+          mkdir -p out/publication
+          cp -a out/release/. out/publication/
+          cp out/downloads/hardware/test-{kernel-commit,orchard-commit,orchard-base}.txt out/publication/
+          cp out/release/rootfs.json out/release/build-receipt.json out/publication/
+          git archive --format=tar.gz -o out/publication/omarchy-linux-source.tar.gz HEAD
+          (cd out/publication && sha256sum ./* > ../SHA256SUMS && mv ../SHA256SUMS .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-j71b-poweroff-assets
+          path: out/publication/*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 2
