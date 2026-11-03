@@ -20,9 +20,25 @@ permissions:
   contents: read
   actions: read
 env:
-  HARDWARE_TAG: ${{ inputs.hardware_tag || 'v0.2.0' }}
+  HARDWARE_TAG: ${{ inputs.hardware_tag || 'nightly' }}
   HARDWARE_ARTIFACT_DIR: ${{ inputs.hardware_run_id != '' && 'out/downloads/hardware' || '' }}
 jobs:
+  orchard:
+    # The orchard version this run builds with, resolved once for every job:
+    # nightly becomes the newest nightly-YYYYMMDD-COMMIT, a tag stays as it is.
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - id: resolve
+        run: |
+          tag="$HARDWARE_TAG"
+          if [[ "$tag" == nightly ]]; then
+            tag=$(curl -fsSL --retry 3 https://github.com/OrchardLinux/orchard/releases/download/nightly/latest.json |
+              python3 -c 'import json, sys; print(json.load(sys.stdin)["name"])')
+          fi
+          echo "orchard $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
   test:
     runs-on: ubuntu-24.04
     strategy:
@@ -91,7 +107,7 @@ jobs:
           retention-days: 2
   userspace:
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-    needs: test
+    needs: [test, orchard]
     runs-on: ubuntu-24.04-arm
     container: docker.io/arch4edu/archlinuxarm@sha256:1db43d1af9917db5fd34af3dab64e2b229a21240e81bb765e3d2d3c34739d587
     timeout-minutes: 180
@@ -101,6 +117,7 @@ jobs:
     env:
       ORCHARD_BUILD_NATIVE: '1'
       ORCHARD_BUILD_ENV_ID: archlinuxarm-1db43d1-desktop-and-system
+      HARDWARE_TAG: ${{ needs.orchard.outputs.tag }}
     steps:
       - name: Reuse unchanged successful outputs
         if: inputs.reuse_run_id != ''
@@ -128,12 +145,16 @@ jobs:
         if: inputs.reuse_run_id == ''
         run: |
           runuser -u builder -- env PATH="$PATH" ORCHARD_BUILD_NATIVE=1 ORCHARD_BUILD_ENV_ID="$ORCHARD_BUILD_ENV_ID" \
+            ORCHARD_CHECKOUT="$GITHUB_WORKSPACE/.orchard" \
             python desktop/build --output out/desktop
           runuser -u builder -- env PATH="$PATH" ORCHARD_BUILD_NATIVE=1 ORCHARD_BUILD_ENV_ID="$ORCHARD_BUILD_ENV_ID" \
+            ORCHARD_CHECKOUT="$GITHUB_WORKSPACE/.orchard" \
             python desktop/build-cursor-helper --output out/cursor
           runuser -u builder -- env PATH="$PATH" ORCHARD_BUILD_NATIVE=1 ORCHARD_BUILD_ENV_ID="$ORCHARD_BUILD_ENV_ID" \
+            ORCHARD_CHECKOUT="$GITHUB_WORKSPACE/.orchard" \
             python desktop/build-bluetooth-tools --output out/bluetooth
           runuser -u builder -- env PATH="$PATH" ORCHARD_BUILD_NATIVE=1 ORCHARD_BUILD_ENV_ID="$ORCHARD_BUILD_ENV_ID" \
+            ORCHARD_CHECKOUT="$GITHUB_WORKSPACE/.orchard" \
             python desktop/build-labwc --output out/labwc
       - name: Build the signed Arch root filesystem
         if: inputs.reuse_run_id == ''
@@ -154,7 +175,11 @@ jobs:
           if-no-files-found: error
           retention-days: 2
   assets:
-    needs: [test, artwork, userspace]
+    needs: [test, orchard, artwork, userspace]
+    env:
+      # orchard's producers run as commands from this snapshot (ci/dependencies clones it).
+      ORCHARD_CHECKOUT: ${{ github.workspace }}/.orchard
+      HARDWARE_TAG: ${{ needs.orchard.outputs.tag }}
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -212,13 +237,19 @@ jobs:
             kernels+=(--kernel-dir "$(basename "$(dirname "$bundle")")=$bundle/kernel")
           done
           tools=out/platforms/apple-16k/components
-          python -m release.build --release "$VERSION" "${kernels[@]}" \
+          # What orchard supplies, as the same inputs file a local build gets; with every
+          # component given from the release bundles, nothing is fetched or built.
+          PYTHONPATH="$ORCHARD_CHECKOUT/src" python -m orchard.inputs --output out/inputs.json "${kernels[@]}" \
+            --m1n1 "$tools/quiet/m1n1.bin" --pongo "$tools/quiet/pongo.bin" --tools "$tools/boot"
+          shared() { python -c 'import json, sys; print(json.load(open("out/inputs.json"))["shared"][sys.argv[1]])' "$1"; }
+          tool() { python -c 'import json, sys; print(json.load(open("out/inputs.json"))["shared"]["tools"][sys.argv[1]])' "$1"; }
+          python -m release.build --release "$VERSION" --inputs out/inputs.json \
             --base out/base/rootfs.tar.gz --base-receipt out/base/rootfs.tar.gz.json \
-            --loader "$tools/quiet/m1n1.bin" --splash out/boot/artwork/splash \
-            --logo out/boot/artwork/logo.bin --pongo "$tools/quiet/pongo.bin" \
-            --busybox "$tools/boot/busybox" --dropbear "$tools/boot/dropbear" \
-            --dropbearkey "$tools/boot/dropbearkey" --wpa-supplicant "$tools/boot/wpa_supplicant" \
-            --wpa-cli "$tools/boot/wpa_cli" --iw "$tools/boot/iw" \
+            --loader "$(shared m1n1)" --splash out/boot/artwork/splash \
+            --logo out/boot/artwork/logo.bin --pongo "$(shared pongo)" \
+            --busybox "$(tool busybox)" --dropbear "$(tool dropbear)" \
+            --dropbearkey "$(tool dropbearkey)" --wpa-supplicant "$(tool wpa_supplicant)" \
+            --wpa-cli "$(tool wpa_cli)" --iw "$(tool iw)" \
             --cursor-tools out/cursor --bluetooth-tools out/bluetooth --labwc-tools out/labwc \
             --output out/release
           python -m release.audit out/release/release.toml
