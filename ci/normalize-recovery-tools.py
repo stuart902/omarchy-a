@@ -55,3 +55,4 @@ if __name__ == '__main__':
     parser.add_argument('--receipt', type=Path, required=True)
     args = parser.parse_args()
     normalize(args.archive, args.receipt)
+
