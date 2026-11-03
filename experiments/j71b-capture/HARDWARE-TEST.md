@@ -41,6 +41,22 @@ libraries or audio routing cause preflight to stop.
 Extract the complete `j71b-microphone-test-aarch64.tar.gz` on the iPad and enter
 its `j71b-microphone-test` folder. Do not mix files from different builds.
 
+An SSH login may not inherit the desktop session's runtime environment. In
+that SSH shell, set it only after verifying the current user's existing
+PipeWire socket. This does not start or restart an audio server. If the check
+fails, stop and report it; do not select another user's socket or run as root.
+
+```sh
+runtime_dir="/run/user/$(id -u)"
+if test -d "$runtime_dir" && test -O "$runtime_dir" && \
+   test -S "$runtime_dir/pipewire-0" && test -O "$runtime_dir/pipewire-0"; then
+    export XDG_RUNTIME_DIR="$runtime_dir" PIPEWIRE_RUNTIME_DIR="$runtime_dir"
+else
+    printf 'STOP: no existing PipeWire socket owned by this SSH user.\n'
+    exit 1
+fi
+```
+
 ```sh
 cd j71b-microphone-test
 sha256sum -c SHA256SUMS
@@ -97,6 +113,21 @@ The WAV is created with owner-only permissions, and its header and actual
 PCM length are checked before success is reported. Recording statistics in
 the session folder identify samples near the emergency-bound region; these
 are not a substitute for hearing the recording or a calibrated gain policy.
+
+Upstream PipeWire 1.6.10 can return status 1 when `pw-record --sample-count`
+successfully reaches its frame limit. The launcher accepts that specific status
+only with an observed correct stereo route, an empty recorder diagnostic log,
+and exactly ten seconds of valid PCM. Other statuses, missing route evidence,
+diagnostics, or incomplete files fail the test. Idle, node removal, default
+identity and kernel checks remain separate requirements. The session stores
+`recorder-outcome.json`, the first verified `recording.json` graph, and
+`last-record.json` so status and route evidence are not lost. A valid WAV alone
+does not prove safe teardown.
+
+If an older package reports `Recording failed or two-channel route was not
+observed` but leaves a WAV, preserve that file and the logs for inspection.
+Do not repeat capture to resolve a launcher error.
+
 Share the WAV and relevant log output for review. Do not upload the entire
 folder publicly: snapshots can include unrelated local application details.
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from hardware_test import (CAPTURE, OUTPUT, RECORDER, SOURCE, check_kernel,
                            check_routes, check_versions, clean_environment, config,
                            defaults, isolate_client_environment, preflight,
-                           recording_stats, stop_child)
+                           recording_stats, stop_child, validate_recorder_completion)
 
 
 def n(ident, name, kind='Audio/Source', state='idle'):
@@ -175,6 +175,35 @@ class HardwarePolicy(unittest.TestCase):
         child.send_signal.assert_called_once_with(signal.SIGINT)
         child.kill.assert_not_called()
         child.terminate.assert_not_called()
+
+    def test_sample_limit_status_requires_complete_wav_and_observed_route(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'test.wav'
+            with wave.open(str(path), 'wb') as wav:
+                wav.setparams((2, 2, 48000, 0, 'NONE', 'not compressed'))
+                wav.writeframes(b'\0' * 480000 * 4)
+            for code in (0, 1):
+                self.assertEqual(validate_recorder_completion(path, code, True, '')['frames'], 480000)
+                with self.assertRaisesRegex(RuntimeError, 'route was not observed'):
+                    validate_recorder_completion(path, code, False, '')
+                with self.assertRaisesRegex(RuntimeError, 'emitted diagnostics'):
+                    validate_recorder_completion(path, code, True, 'stream error\n')
+            for code in (-signal.SIGINT, -signal.SIGSEGV, 2, 127, None):
+                with self.subTest(returncode=code), self.assertRaisesRegex(RuntimeError, 'exited with status'):
+                    validate_recorder_completion(path, code, True, '')
+            with path.open('r+b') as truncated:
+                truncated.truncate(1024)
+            with self.assertRaisesRegex(RuntimeError, 'payload is truncated'):
+                validate_recorder_completion(path, 1, True, '')
+
+    def test_sample_limit_status_cannot_accept_short_recording(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'short.wav'
+            with wave.open(str(path), 'wb') as wav:
+                wav.setparams((2, 2, 48000, 0, 'NONE', 'not compressed'))
+                wav.writeframes(b'\0' * 100 * 4)
+            with self.assertRaisesRegex(RuntimeError, 'expected ten seconds'):
+                validate_recorder_completion(path, 1, True, '')
 
 
 if __name__ == '__main__':

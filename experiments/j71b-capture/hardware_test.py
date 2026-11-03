@@ -263,6 +263,21 @@ def recording_stats(path):
         for ch in range(2)]}
 
 
+def validate_recorder_completion(path, returncode, seen_flow, recorder_log):
+    # In pinned PipeWire 1.6.10, pw-cat's recording sample-limit path quits
+    # without setting data.drained. main therefore returns EXIT_FAILURE (1)
+    # even after writing the requested frames. Never treat that status alone
+    # as success: require the observed stereo route, silent diagnostics, and
+    # the exact WAV header AND physical payload. Lifecycle checks still follow.
+    if returncode not in (0, 1):
+        raise RuntimeError(f'Recorder exited with status {returncode}; inspect recorder.log')
+    if not seen_flow:
+        raise RuntimeError('Two-channel recording route was not observed')
+    if recorder_log.strip():
+        raise RuntimeError('Recorder emitted diagnostics; inspect recorder.log before another capture')
+    return recording_stats(path)
+
+
 def stop_child(child, label):
     if child is None or child.poll() is not None:
         return
@@ -368,12 +383,21 @@ def main(client_directory):
             current_recorder = [o for o in nodes(current) if props(o).get('node.name') == RECORDER]
             if current_recorder:
                 recorder_id = current_recorder[0]['id']
+            if links == 2 and not seen_flow:
+                (session/'recording.json').write_text(json.dumps(current, indent=2))
             seen_flow |= links == 2
             if time.monotonic() >= deadline:
                 raise RuntimeError('Recording did not finish. Stop; do not retry capture')
             time.sleep(.2)
-        if recorder.returncode or not seen_flow:
-            raise RuntimeError('Recording failed or two-channel route was not observed')
+        (session/'last-record.json').write_text(json.dumps(current, indent=2))
+        outcome = {'returncode': recorder.returncode, 'observed_stereo_route': seen_flow,
+                   'recorder_node_id': recorder_id}
+        (session/'recorder-outcome.json').write_text(json.dumps(outcome, indent=2))
+        stats = validate_recorder_completion(output_file, recorder.returncode, seen_flow,
+                                             (session/'recorder.log').read_text())
+        (session/'recording-stats.json').write_text(json.dumps(stats, indent=2))
+        if recorder.returncode == 1:
+            print('Complete ten-second WAV and stereo route validated; PipeWire 1.6.10 returned status 1, also used for sample-limit completion.', flush=True)
         # Allow the normal session-manager idle timeout, without forcing suspend.
         deadline = time.monotonic() + 8
         while True:
@@ -409,8 +433,6 @@ def main(client_directory):
     (session/'after-cleanup.json').write_text(json.dumps(final, indent=2))
     if args.kernel_log is None:
         (session/'kernel-after.txt').write_text(kernel_before(None))
-    stats = recording_stats(output_file)
-    (session/'recording-stats.json').write_text(json.dumps(stats, indent=2))
     if any(ch['samples_near_emergency_bound'] for ch in stats['channels']):
         print('Warning: samples reached the emergency-bound region; do not increase gain.')
     print(f'Validated ten-second WAV: {output_file}. No playback was started. Check the fresh kernel log before another capture.')
