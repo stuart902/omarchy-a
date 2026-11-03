@@ -81,6 +81,7 @@ jobs:
       run:
         shell: bash
     env:
+      ORCHARD_CHECKOUT: ${{ github.workspace }}/.orchard
       ORCHARD_BUILD_NATIVE: '1'
       ORCHARD_BUILD_ENV_ID: archlinuxarm-1db43d1-desktop-and-system
       HARDWARE_TAG: v0.2.0
