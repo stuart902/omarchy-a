@@ -1,0 +1,145 @@
+name: J71b mask-readback diagnostic installer (no release)
+on:
+  push:
+    branches: [test/j71b-mask-readback-ci-nov3]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  HARDWARE_TAG: v0.2.0
+  HARDWARE_ARTIFACT_DIR: out/downloads/hardware
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Validate release tag
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: '[[ "$TAG" =~ ^v[A-Za-z0-9][A-Za-z0-9._-]*$ ]]'
+      - name: Check release notes
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: ci/release-notes "$TAG" >/dev/null
+      # Tests follow orchard main; builds use the pinned orchard release (ci/dependencies).
+      - name: Checkout exact Orchard source
+        uses: actions/checkout@v4
+        with:
+          repository: stuart902/orchard
+          ref: 6b5fca68c56868651113ede0063a3061d0b22914
+          path: .orchard
+          persist-credentials: false
+      - name: Install orchard main
+        run: bash ci/dependencies --tools-only
+        env:
+          ORCHARD_REF: main
+      - run: .venv/bin/python -m unittest discover -s tests -v
+  # Pongo is not built here: releases ship hardware's one Pongo (quiet/pongo.bin).
+  assets:
+    needs: [test]
+    env:
+      # orchard's producers run as commands from this snapshot (ci/dependencies clones it).
+      ORCHARD_CHECKOUT: ${{ github.workspace }}/.orchard
+      HARDWARE_TAG: v0.2.0
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: sudo apt-get update && sudo apt-get install -y zstd
+      - name: Reuse exact desktop, artwork and diagnostic hardware artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python ci/fetch-test-artifact.py --repo stuart902/omarchy-a --run 41580018324 --commit 90b7222309461fb4531c468e66c9cd40735c6707 --artifact 13205705653 --sha256 37104e1fa42855a77c4ef81fab90ba6fe4e155cd8af227fe9254fb27bafc680a --output out/downloads
+          python ci/fetch-test-artifact.py --repo stuart902/omarchy-a --run 41580018324 --commit 90b7222309461fb4531c468e66c9cd40735c6707 --artifact 13205213896 --sha256 83a5b3e54408892ffa8eb3c40091ade084f3cbd9d403e947c994157571a2e246 --output out/downloads
+          python ci/fetch-test-artifact.py --repo stuart902/orchard --run 41692673709 --commit 1463ba487c64d288ec12b2034ffb25bd2915a31b --artifact 13261831080 --sha256 fa6c73fbbc8009b38ab8bcbd47767db1bc564bbf8bc5652a8ea606fc38d29f16 --output out/downloads/hardware
+      - name: Checkout exact Orchard source
+        uses: actions/checkout@v4
+        with:
+          repository: stuart902/orchard
+          ref: 6b5fca68c56868651113ede0063a3061d0b22914
+          path: .orchard
+          persist-credentials: false
+      - name: Verify exact hardware artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh api repos/stuart902/orchard/actions/runs/41692673709 --jq .head_sha)" = "1463ba487c64d288ec12b2034ffb25bd2915a31b"
+          (cd out/downloads/hardware && sha256sum --check --strict SHA256SUMS)
+          test "$(cat out/downloads/hardware/test-kernel-commit.txt)" = "2a38ac557f9ce63580d473e860ffdf77e879ec6d"
+          test "$(cat out/downloads/hardware/test-orchard-commit.txt)" = "1463ba487c64d288ec12b2034ffb25bd2915a31b"
+          test "$(cat out/downloads/hardware/test-orchard-base.txt)" = "6b5fca68c56868651113ede0063a3061d0b22914"
+      - run: bash ci/dependencies
+      - name: Assemble, audit and stage hosted assets
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          . .venv/bin/activate
+          tar -xzf out/downloads/omarchy-userspace.tar.gz -C out
+          python ci/normalize-recovery-tools.py --archive out/base/rootfs.tar.gz --receipt out/base/rootfs.tar.gz.json
+          tar -xzf out/downloads/boot-inputs.tar.gz -C out
+          VERSION="preview-mask-readback-$RUN_ID"
+          TAG="v$VERSION"
+          if [[ "$REF_TYPE" == tag ]]; then TAG="$REF_NAME"; VERSION="${TAG#v}"; fi
+          # Every platform's kernel from orchard's bundles; the shared tools are in each.
+          kernels=()
+          for bundle in out/platforms/*/components; do
+            kernels+=(--kernel-dir "$(basename "$(dirname "$bundle")")=$bundle/kernel")
+          done
+          tools=out/platforms/apple-16k/components
+          # What orchard supplies, as the same inputs file a local build gets; with every
+          # component given from the release bundles, nothing is fetched or built.
+          PYTHONPATH="$ORCHARD_CHECKOUT/src" python -m orchard.inputs --output out/inputs.json "${kernels[@]}" \
+            --m1n1 "$tools/quiet/m1n1.bin" --pongo "$tools/quiet/pongo.bin" --tools "$tools/boot"
+          shared() { python -c 'import json, sys; print(json.load(open("out/inputs.json"))["shared"][sys.argv[1]])' "$1"; }
+          tool() { python -c 'import json, sys; print(json.load(open("out/inputs.json"))["shared"]["tools"][sys.argv[1]])' "$1"; }
+          python -m release.build --release "$VERSION" --inputs out/inputs.json \
+            --base out/base/rootfs.tar.gz --base-receipt out/base/rootfs.tar.gz.json \
+            --loader "$(shared m1n1)" --splash out/boot/artwork/splash \
+            --logo out/boot/artwork/logo.bin --pongo "$(shared pongo)" \
+            --busybox "$(tool busybox)" --dropbear "$(tool dropbear)" \
+            --dropbearkey "$(tool dropbearkey)" --wpa-supplicant "$(tool wpa_supplicant)" \
+            --wpa-cli "$(tool wpa_cli)" --iw "$(tool iw)" \
+            --cursor-tools out/cursor --bluetooth-tools out/bluetooth --labwc-tools out/labwc \
+            --output out/release
+          python -m release.audit out/release/release.toml
+          python -m orchard.manifests --verify-local out/release/index.toml
+          # The installer: install.sh and orchard-install.pyz with orchard's launch loaders.
+          python -m orchard.installer release out/release \
+            --pongo "$tools/quiet/pongo.bin" --m1n1 "$tools/quiet/m1n1.bin"
+          mkdir -p out/publication
+          cp -a out/release/. out/publication/
+          cp out/downloads/hardware/test-{kernel-commit,orchard-commit,orchard-base}.txt out/publication/
+          cp out/release/rootfs.json out/release/build-receipt.json out/publication/
+          cp out/downloads/hardware/kernel-source-*.tar.gz out/downloads/hardware/pongo-source.tar.gz out/downloads/hardware/recovery-tool-source.tar.gz out/downloads/hardware/orchard-source.tar.gz out/publication/
+          git archive --format=tar.gz -o out/publication/omarchy-linux-source.tar.gz HEAD
+          cp ci/mask-test-README.md out/publication/TEST-README.md
+          (cd out/publication && sha256sum ./* > ../SHA256SUMS && mv ../SHA256SUMS .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-j71b-mask-readback-assets
+          path: out/publication/*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
