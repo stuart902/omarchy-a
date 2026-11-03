@@ -135,7 +135,7 @@ class ActualGraph(unittest.TestCase):
         self.assertGreater(float(abs(y[0, 0])), .12)
         self.assertLess(float(abs(y[-1, 0])), 1e-5)
 
-    def test_stock_ramp_does_not_restart_on_graph_reset(self):
+    def test_stock_ramp_has_version_specific_regression_baseline(self):
         graph = stock_graph()
         graph['nodes'] += [
             {'type': 'builtin', 'name': 'ramp', 'label': 'ramp',
@@ -147,11 +147,22 @@ class ActualGraph(unittest.TestCase):
         graph['outputs'] = ['m0:Out', 'm1:Out']
         x = np.full((RATE, 2), .13, np.float32)
         with Graph(graph) as engine:
+            version = engine.version
             first = engine.process(x)
             engine.reset()
             resumed = engine.process(x)
         self.assertEqual(float(first[0, 0]), 0)
-        self.assertGreater(float(resumed[0, 0]), .12)
+        if version == '1.4.2':
+            self.assertGreater(float(np.max(abs(first))), .0001)
+            self.assertGreater(float(resumed[0, 0]), .12)
+        elif version == '1.6.10':
+            # This version clamps JSON controls to declared ranges. The stock
+            # ramp declares min=max=0 for Stop and Duration, so it stays muted.
+            # Zero output must not be mistaken for successful restart handling.
+            np.testing.assert_array_equal(first, 0)
+            np.testing.assert_array_equal(resumed, 0)
+        else:
+            self.skipTest(f'Stock ramp baseline not characterized for {version}')
 
     def test_fixture_is_inert_and_synthetic_only(self):
         from fixture_config import fixture

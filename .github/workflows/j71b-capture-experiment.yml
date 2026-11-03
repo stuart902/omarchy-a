@@ -34,3 +34,27 @@ jobs:
           make sanitize
           python3 spa_graph.py
           python3 fixture_config.py build/j71b-capture.so > build/fixture.conf
+  upstream-spa:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+    timeout-minutes: 20
+    steps:
+      - name: Install source-build test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential ladspa-sdk python3-numpy \
+            libpipewire-0.3-0t64 libspa-0.2-modules meson ninja-build pkg-config
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build pinned PipeWire 1.6.10 and run the real graph tests
+        run: |
+          git clone --depth 1 --branch 1.6.10 \
+            https://github.com/PipeWire/pipewire.git "$RUNNER_TEMP/pipewire-1.6.10"
+          bash experiments/j71b-capture/test_pipewire_1_6.sh \
+            "$RUNNER_TEMP/pipewire-1.6.10" "$RUNNER_TEMP/pipewire-build"

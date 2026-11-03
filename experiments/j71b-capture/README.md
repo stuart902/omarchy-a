@@ -73,6 +73,21 @@ or playback on a tablet is part of CI. CI and a headless graph pass do not
 establish WirePlumber routing, a real-time deadline, ARM performance, hardware
 capture lifecycle or the installed tablet's PipeWire version compatibility.
 
+The upstream CI jobs also build the exact PipeWire 1.6.10 commit on native
+x86-64 and ARM64 and repeat the graph tests against that library and its SPA
+plugins. They assert the loaded runtime version, not just the checkout tag.
+To reproduce with `meson`, `ninja-build` and `pkg-config` installed:
+
+```sh
+git clone --depth 1 --branch 1.6.10 https://github.com/PipeWire/pipewire.git build/pipewire-source
+bash test_pipewire_1_6.sh build/pipewire-source build/pipewire-build
+```
+
+The script checks the immutable commit and rejects tracked source changes.
+It never installs PipeWire, starts a daemon, or connects to a sound device.
+An upstream 1.6.10 graph pass still does not test a distribution's complete
+runtime configuration or capture lifecycle.
+
 Optional configuration output is intentionally inert:
 
 ```sh
@@ -114,7 +129,11 @@ the usable microphone outcome.
 
 The locally exercised engine version must be reported explicitly. A current
 web documentation version does not prove compatibility with that engine or
-the tablet. Source inspection of 1.6.10 confirms the version-0 graph ABI and
-the playback-pause reset call, but does not substitute for running that version.
-The stock ramp has no activation callback in either inspected version; a ramp
-that only works on first construction is not sufficient for capture restart.
+the tablet. Source inspection alone does not substitute for running a version.
+The stock ramp fixture has different failures in the two tested runtimes:
+1.4.2 does not restart its fade on graph reset. In upstream 1.6.10, JSON
+controls are clamped to declared ranges; the ramp's zero-valued ranges clamp
+`Stop=1` and `Duration=.02` to zero and mute the fixture. This is not evidence
+of a corrected fade. The version-specific negative control records both
+behaviors; the candidate's nonzero AC, gain, envelope and reset assertions are
+identical across runtimes and do not use the stock ramp.
