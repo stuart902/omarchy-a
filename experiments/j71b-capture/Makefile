@@ -17,7 +17,7 @@ $(BUILD)/test-capture: test_capture.c capture.c | $(BUILD)
 
 test: all $(BUILD)/test-capture
 	$(BUILD)/test-capture
-	python3 -m unittest -v test_graph
+	python3 -m unittest -v test_graph test_hardware
 
 sanitize: | $(BUILD)
 	$(CC) $(CPPFLAGS) -g -O1 $(WARN) -fsanitize=address,undefined \

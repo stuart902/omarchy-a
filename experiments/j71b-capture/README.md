@@ -4,7 +4,10 @@
 system overlay and distribution build. It changes no driver, image, audio
 route, speaker setting, service or default volume. No recording or private
 calibration is included. Do not copy the experiment into a live PipeWire
-configuration yet.
+configuration as a persistent profile. An explicitly requested, one-session
+hardware acceptance procedure is provided in [HARDWARE-TEST.md](HARDWARE-TEST.md).
+It is not enabled or installed automatically, and it does not remove the
+remaining lifecycle and hardware acceptance requirements below.
 
 This advances the microphone deliverable by testing the **real PipeWire SPA
 filter-graph engine** with a candidate that handles startup and reset, rather

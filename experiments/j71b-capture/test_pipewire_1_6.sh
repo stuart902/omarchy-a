@@ -44,3 +44,4 @@ with Graph(stock_graph()) as graph:
 PY
 make test
 python3 spa_graph.py
+python3 test_config_parser.py "$build_dir/src/tools/pw-config"

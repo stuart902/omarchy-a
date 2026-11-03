@@ -27,6 +27,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Build and exercise the real installed SPA graph
         working-directory: experiments/j71b-capture
         run: |
@@ -34,6 +35,33 @@ jobs:
           make sanitize
           python3 spa_graph.py
           python3 fixture_config.py build/j71b-capture.so > build/fixture.conf
+      - name: Package opt-in native ARM hardware test
+        if: matrix.runner == 'ubuntu-24.04-arm'
+        working-directory: experiments/j71b-capture
+        run: |
+          test "$(uname -m)" = aarch64
+          mkdir -p build/j71b-microphone-test
+          cp build/j71b-capture.so build/test-capture hardware_test.py \
+            HARDWARE-TEST.md capture.c test_capture.c build/j71b-microphone-test/
+          {
+            printf 'Repository: https://github.com/stuart902/omarchy-a\n'
+            printf 'Source commit: %s\n' "$(git rev-parse HEAD)"
+            printf 'Architecture: %s\n' "$(uname -m)"
+            printf 'Build environment: Debian trixie; native ARM64\n'
+            printf 'No tablet or daemon lifecycle test has run in CI.\n'
+            cc --version | head -1
+            ldd --version | head -1
+          } > build/j71b-microphone-test/BUILD-INFO.txt
+          (cd build/j71b-microphone-test && sha256sum \
+            j71b-capture.so test-capture hardware_test.py HARDWARE-TEST.md \
+            capture.c test_capture.c BUILD-INFO.txt > SHA256SUMS)
+          tar -C build -czf build/j71b-microphone-test-aarch64.tar.gz j71b-microphone-test
+      - uses: actions/upload-artifact@v4
+        if: matrix.runner == 'ubuntu-24.04-arm'
+        with:
+          name: j71b-microphone-test-aarch64
+          path: experiments/j71b-capture/build/j71b-microphone-test-aarch64.tar.gz
+          if-no-files-found: error
   upstream-spa:
     strategy:
       fail-fast: false
@@ -52,6 +80,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Build pinned PipeWire 1.6.10 and run the real graph tests
         run: |
           git clone --depth 1 --branch 1.6.10 \
