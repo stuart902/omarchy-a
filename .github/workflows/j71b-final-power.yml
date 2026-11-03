@@ -1,0 +1,201 @@
+name: J71b final power qualification assembly
+on:
+  push:
+    branches: [test/j71b-power-final-20261103]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  ORCHARD_SOURCE: a68aae672613176d203d4a3823f03f929bc84f5c
+  BUILT_SOURCE: 1b9457c9cc17327ccd08a19a0181c28c6d6028ed
+  OMARCHY_SOURCE: 2a9462d90c57409173b2d8be7fe998731467ed1c
+  USERSPACE_SOURCE: 94e93b8aa393da61a8d6d855f1601382867488fc
+  ORCHARD_CHECKOUT: ${{ github.workspace }}/.orchard
+  HARDWARE_TAG: v0.2.0
+jobs:
+  assemble:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: stuart902/orchard
+          ref: ${{ env.ORCHARD_SOURCE }}
+          path: .orchard
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Verify sources and unchanged reusable inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          df -h "$PWD"
+          python -c 'import shutil; assert shutil.disk_usage(".").free >= 10 * 1024**3'
+          git fetch --no-tags --depth=1 origin "$OMARCHY_SOURCE" "$USERSPACE_SOURCE"
+          git diff --exit-code "$OMARCHY_SOURCE" HEAD -- desktop system boot release
+          changes="$(git diff --name-only "$USERSPACE_SOURCE" "$OMARCHY_SOURCE" -- desktop system boot release)"
+          test "$changes" = "desktop/shell/default/omarchy/omarchy-menu.jsonc"
+          git -C .orchard fetch --no-tags --depth=1 origin "$BUILT_SOURCE"
+          test "$(git -C .orchard rev-parse HEAD)" = "$ORCHARD_SOURCE"
+          test "$(git -C .orchard rev-parse HEAD^{tree})" = "2cbfb968f4312ee59fb584613a639cc4a5c730e3"
+          test "$(git -C .orchard rev-parse HEAD^{tree})" = "$(git -C .orchard rev-parse "$BUILT_SOURCE^{tree}")"
+          mkdir -p out/evidence
+          gh api repos/stuart902/orchard/actions/runs/41734585711 > out/evidence/component-run.json
+          gh api repos/stuart902/omarchy-a/actions/runs/41580024596 > out/evidence/userspace-run.json
+          python - <<'PY'
+          import json, os
+          for name, expected in [('component', '81b364712f9bbc9ea44aeac6825f0be1e63b071b'),
+                                 ('userspace', os.environ['USERSPACE_SOURCE'])]:
+              run=json.load(open(f'out/evidence/{name}-run.json'))
+              assert run['status']=='completed' and run['conclusion']=='success'
+              assert run['head_sha']==expected
+          PY
+      - name: Fetch retained 16K components
+        uses: actions/download-artifact@v4
+        with:
+          repository: stuart902/orchard
+          run-id: 41734585711
+          name: orchard-integrated-apple-16k
+          path: out/downloads/apple-16k
+          github-token: ${{ github.token }}
+      - name: Fetch retained 4K components
+        uses: actions/download-artifact@v4
+        with:
+          repository: stuart902/orchard
+          run-id: 41734585711
+          name: orchard-integrated-apple-4k
+          path: out/downloads/apple-4k
+          github-token: ${{ github.token }}
+      - name: Reuse retained userspace
+        uses: actions/download-artifact@v4
+        with:
+          run-id: 41580024596
+          name: omarchy-userspace
+          path: out/downloads
+          github-token: ${{ github.token }}
+      - name: Reuse retained artwork
+        uses: actions/download-artifact@v4
+        with:
+          run-id: 41580024596
+          name: omarchy-boot-inputs
+          path: out/downloads
+          github-token: ${{ github.token }}
+      - name: Verify complete component receipts and exact built source
+        run: |
+          set -euo pipefail
+          for platform in apple-16k apple-4k; do
+            (cd "out/downloads/$platform" && sha256sum --check --strict SHA256SUMS)
+            mkdir -p "out/platforms/$platform"
+            tar -xzf "out/downloads/$platform/$platform-components.tar.gz" -C "out/platforms/$platform"
+          done
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          for platform in ['apple-16k','apple-4k']:
+              root=Path('out/platforms')/platform/'components'
+              record=json.loads((root/'components.json').read_text())
+              assert record['schema']==1
+              for name, want in record['files'].items():
+                  path=root/name
+                  assert path.is_file() and not path.is_symlink()
+                  assert path.stat().st_size==want['bytes']
+                  assert hashlib.sha256(path.read_bytes()).hexdigest()==want['sha256'], name
+              evidence=json.loads((root/'integration-receipt.json').read_text())
+              assert evidence['orchard']==os.environ['BUILT_SOURCE']
+              assert evidence['platform']==platform and evidence['config_exact']
+              assert evidence['power_source_linux']=='778174c50d5fd6b36849f9eea728a6811b1b6e9e'
+              assert evidence['power_files']['drivers/power/reset/apple-d2365-poweroff.c']=='c7cf8dceed4cc707ff3bedb997f6a36cf384ba68a96ea87b2e5e4c49ed818354'
+              assert (root/'resolved.config').read_bytes()==(Path('.orchard/kernel/configs')/platform/'config').read_bytes()
+          PY
+      - name: Install assembly tooling and run final menu suite
+        run: |
+          sudo apt-get update && sudo apt-get install -y zstd device-tree-compiler
+          bash ci/dependencies --tools-only
+          .venv/bin/python -m unittest discover -s tests -v
+      - name: Reassemble finished distribution without rebuilding components
+        run: |
+          set -euo pipefail
+          . .venv/bin/activate
+          tar -xzf out/downloads/omarchy-userspace.tar.gz -C out
+          python ci/normalize-recovery-tools.py --archive out/base/rootfs.tar.gz --receipt out/base/rootfs.tar.gz.json
+          tar -xzf out/downloads/boot-inputs.tar.gz -C out
+          tools=out/platforms/apple-16k/components
+          PYTHONPATH="$ORCHARD_CHECKOUT/src" python -m orchard.inputs --output out/inputs.json \
+            --kernel-dir apple-16k=out/platforms/apple-16k/components/kernel \
+            --kernel-dir apple-4k=out/platforms/apple-4k/components/kernel \
+            --m1n1 "$tools/quiet/m1n1.bin" --pongo "$tools/quiet/pongo.bin" --tools "$tools/boot"
+          python ci/assemble-power-qualification.py --release "power-final-a68aae6-$GITHUB_RUN_ID" \
+            --inputs out/inputs.json --base out/base/rootfs.tar.gz --base-receipt out/base/rootfs.tar.gz.json \
+            --loader "$tools/quiet/m1n1.bin" --splash out/boot/artwork/splash --logo out/boot/artwork/logo.bin \
+            --pongo "$tools/quiet/pongo.bin" --busybox "$tools/boot/busybox" \
+            --dropbear "$tools/boot/dropbear" --dropbearkey "$tools/boot/dropbearkey" \
+            --wpa-supplicant "$tools/boot/wpa_supplicant" --wpa-cli "$tools/boot/wpa_cli" --iw "$tools/boot/iw" \
+            --cursor-tools out/cursor --bluetooth-tools out/bluetooth --labwc-tools out/labwc --output out/release
+          python -m release.audit out/release/release.toml
+          python -m orchard.manifests --verify-local out/release/index.toml
+          python ci/assemble-power-qualification.py --verify out/release
+          python -m orchard.installer release out/release --pongo "$tools/quiet/pongo.bin" --m1n1 "$tools/quiet/m1n1.bin"
+      - name: Record provenance, source and qualification boundary
+        run: |
+          set -euo pipefail
+          . .venv/bin/activate
+          python - <<'PY'
+          import hashlib,json,os,subprocess,sys
+          from pathlib import Path
+          sys.path.insert(0,'ci')
+          import importlib.util
+          spec=importlib.util.spec_from_file_location('qualification','ci/assemble-power-qualification.py')
+          adapter=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(adapter)
+          out=Path('out/release')
+          revision=json.loads((out/'build-receipt.json').read_text())['orchard']
+          assert revision['commit']==os.environ['ORCHARD_SOURCE'] and not revision['modified']
+          receipts={p:json.loads((Path('out/platforms')/p/'components/integration-receipt.json').read_text())
+                    for p in ['apple-16k','apple-4k']}
+          record={'schema':1,'orchard':os.environ['ORCHARD_SOURCE'],
+            'orchard_tree':'2cbfb968f4312ee59fb584613a639cc4a5c730e3',
+            'component_source':os.environ['BUILT_SOURCE'],'component_run':41734585711,
+            'omarchy':os.environ['OMARCHY_SOURCE'],'userspace_source':os.environ['USERSPACE_SOURCE'],
+            'userspace_run':41580024596,'assembly_commit':os.environ['GITHUB_SHA'],
+            'assembly_run':int(os.environ['GITHUB_RUN_ID']),
+            'menu_staged_sha256':hashlib.sha256(adapter.staged_menu()).hexdigest(),
+            'base_receipt':json.loads(Path('out/base/rootfs.tar.gz.json').read_text()),
+            'components':receipts,'hardware_tested':False}
+          (out/'qualification-receipt.json').write_text(json.dumps(record,indent=2)+'\n')
+          PY
+          cp docs/power-qualification.md out/release/QUALIFICATION.md
+          git archive --format=tar.gz -o out/release/omarchy-source.tar.gz "$OMARCHY_SOURCE"
+          git archive --format=tar.gz -o out/release/assembly-source.tar.gz HEAD ci .github/workflows/j71b-final-power.yml docs/power-qualification.md
+          git -C .orchard archive --format=tar.gz -o "$PWD/out/release/orchard-source.tar.gz" "$ORCHARD_SOURCE"
+          for platform in apple-16k apple-4k; do
+            cp "out/downloads/$platform/kernel-source-$platform.tar.gz" out/release/
+          done
+          cp out/downloads/apple-16k/pongo-source.tar.gz out/release/
+          (cd out/release && sha256sum * > ../FINAL-SHA256SUMS && mv ../FINAL-SHA256SUMS SHA256SUMS)
+          git diff --exit-code
+          git -C .orchard diff --exit-code
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-j71b-final-power-a68aae6
+          path: out/release/*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j71b-final-power-failure
+          path: |
+            out/evidence/
+            out/inputs.json
+            out/base/rootfs.tar.gz.json
+          if-no-files-found: ignore
+          retention-days: 7
+
