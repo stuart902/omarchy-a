@@ -96,7 +96,7 @@ jobs:
           python -m release.audit out/release/release.toml
           python -m orchard.manifests --verify-local out/release/index.toml
           python ci/audit-capture-platform.py out/platform/components/kernel --layer out/release/platform-apple-16k.tar.gz
-          python ci/audit-audio-kernel-consistency.py out/platform/components/kernel --layer out/release/platform-apple-16k.tar.gz --pins ci/audio-desktop-inputs.json --receipt out/platform/components/integration-receipt.json
+          python ci/audit-audio-kernel-consistency.py out/platform/components/kernel --orchard .orchard --layer out/release/platform-apple-16k.tar.gz --pins ci/audio-desktop-inputs.json --receipt out/platform/components/integration-receipt.json
           python -m orchard.installer release out/release --pongo out/platform/components/quiet/pongo.bin --m1n1 out/platform/components/quiet/m1n1.bin
           cmp out/previous/rootfs.tar.zst out/release/rootfs.tar.zst
           cmp out/previous/rootfs.json out/release/rootfs.json
@@ -141,7 +141,7 @@ jobs:
           cmp out/previous/rootfs.tar.zst out/publication/rootfs.tar.zst
           cmp out/previous/rootfs.json out/publication/rootfs.json
           cmp out/previous/omarchy-linux-source.tar.gz out/publication/reused-desktop-source.tar.gz
-          python ci/audit-audio-kernel-consistency.py out/platform/components/kernel --layer out/publication/platform-apple-16k.tar.gz --pins out/publication/audio-desktop-inputs.json --receipt out/publication/integration-receipt.json
+          python ci/audit-audio-kernel-consistency.py out/platform/components/kernel --orchard .orchard --layer out/publication/platform-apple-16k.tar.gz --pins out/publication/audio-desktop-inputs.json --receipt out/publication/integration-receipt.json
           (cd out/publication && sha256sum ./* > ../SHA256SUMS && mv ../SHA256SUMS .)
       - uses: actions/upload-artifact@v4
         with:

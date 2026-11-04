@@ -3,9 +3,11 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import tarfile
+import tomllib
 
 
 def audit_provenance(kernel, pins_path, receipt_path):
@@ -42,7 +44,32 @@ def audit_provenance(kernel, pins_path, receipt_path):
 EXPECTED_RELEASE = '7.3.0-rc1-j71b-audio-nov4-r1-orchard-apple-16k'
 
 
-def audit(kernel, layer=None):
+def registered_dtbs(orchard):
+    if orchard is None:
+        raise ValueError('Pinned Orchard checkout is required for a layer audit')
+    platform = tomllib.loads((orchard / 'platforms/apple-16k.toml').read_text())
+    if platform.get('kind') != 'hardware.platform' or platform.get('name') != 'apple-16k':
+        raise ValueError('Invalid pinned platform descriptor')
+    boards = {}
+    for path in sorted((orchard / 'devices').glob('*/device.toml')):
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError('Device descriptor is a symlink')
+        device = tomllib.loads(path.read_text())
+        kernel = device.get('kernel', {})
+        if kernel.get('platform') != 'apple-16k':
+            continue
+        board, dtb = path.parent.name, kernel.get('dtb')
+        if (device.get('kind') != 'hardware.device' or
+                device.get('device', {}).get('profile') != board or
+                not isinstance(dtb, str) or not re.fullmatch('[a-zA-Z0-9_-]+', dtb)):
+            raise ValueError('Invalid registered device/DTB: ' + str(path))
+        boards[board] = dtb
+    if boards.get('j71b') != 't8010-j71b':
+        raise ValueError('Pinned platform does not register the J71b DTB')
+    return boards
+
+
+def audit(kernel, layer=None, orchard=None):
     release = (kernel / 'kernel.release').read_text().strip()
     if release != EXPECTED_RELEASE:
         raise ValueError('Unexpected kernel release: ' + release)
@@ -58,13 +85,21 @@ def audit(kernel, layer=None):
         prefix = 'usr/lib/modules/' + release + '/'
         expected = {prefix + p.relative_to(modules).as_posix(): p for p in modules.rglob('*') if p.is_file()}
         expected[prefix + 'vmlinuz'] = kernel / 'Image.gz'
-        expected.update({prefix + 'dtb/' + p.name: p for p in (kernel / 'dtbs').glob('*.dtb')})
+        boards = registered_dtbs(orchard)
+        expected.update({prefix + 'dtb/' + dtb + '.dtb': kernel / 'dtbs' / (dtb + '.dtb')
+                         for dtb in set(boards.values())})
         with tarfile.open(layer, 'r:*') as archive:
             actual = {}
             for member in archive:
                 if member.name in actual:
                     raise ValueError('Duplicate layer path')
                 actual[member.name] = member
+            description = actual.get('usr/lib/orchard/platform.json')
+            if description is None or not description.isfile():
+                raise ValueError('Missing platform descriptor in layer')
+            description = json.load(archive.extractfile(description))
+            if description.get('boards') != boards:
+                raise ValueError('Installed board map differs from pinned Orchard descriptors')
             for name, source in expected.items():
                 entry = actual.get(name)
                 if not entry or not entry.isfile():
@@ -82,9 +117,10 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('kernel', type=Path)
     p.add_argument('--layer', type=Path)
+    p.add_argument('--orchard', type=Path)
     p.add_argument('--pins', type=Path)
     p.add_argument('--receipt', type=Path)
     a = p.parse_args()
     if bool(a.pins) != bool(a.receipt): p.error('--pins and --receipt must be paired')
     if a.pins: audit_provenance(a.kernel, a.pins, a.receipt)
-    audit(a.kernel, a.layer)
+    audit(a.kernel, a.layer, a.orchard)
