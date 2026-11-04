@@ -1,0 +1,8 @@
+{
+  "orchard_commit": "05181b92308586bd49232ef45fad3150c75f6455",
+  "kernel_commit": "6af872e1ca0ecfd8eb0c6b5f21bed1c964d45b48",
+  "hardware_run": "41913464428",
+  "hardware_artifact": "13365686392",
+  "hardware_sha256": "02caa64b595a11489c6215e0be99cfb94fd75aae6dbccdca18574dadceb4f200",
+  "upstream_orchard_commit": "79df400f60c76154a47fdb4dc1eff06dbb1aa8a2"
+}
