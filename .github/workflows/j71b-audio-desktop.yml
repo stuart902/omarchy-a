@@ -1,0 +1,165 @@
+name: J71b current audio desktop test (no release)
+on:
+  push:
+    branches: [test/j71b-audio-desktop-nov4]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  installer:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      HARDWARE_TAG: v0.2.0
+      ORCHARD_CHECKOUT: ${{ github.workspace }}/.orchard
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Require resolved immutable source and artifact pins
+        id: pins
+        run: |
+          python - <<'PY'
+          import json, os, re
+          pins = json.load(open('ci/audio-desktop-inputs.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in pins.items():
+                  pattern = r'[0-9]+' if key in ('hardware_run', 'hardware_artifact') else r'[0-9a-f]{64}' if key == 'hardware_sha256' else r'[0-9a-f]{40}'
+                  if not re.fullmatch(pattern, value):
+                      raise SystemExit('Unresolved or invalid immutable pin: ' + key)
+                  print(key + '=' + value, file=output)
+          PY
+      - uses: actions/checkout@v4
+        with:
+          repository: stuart902/orchard
+          ref: ${{ steps.pins.outputs.orchard_commit }}
+          path: .orchard
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y zstd device-tree-compiler kmod
+      - run: bash ci/dependencies --tools-only
+      - name: Run local test suites
+        run: |
+          .venv/bin/python -m unittest discover -s tests -v
+          python ci/test-audit-capture-rootfs.py
+          python ci/test-audit-capture-platform.py
+          python ci/test-assemble-audio-desktop.py
+          python ci/test-audit-audio-kernel-consistency.py
+          python ci/test-verify-hardware-attestations.py
+      - name: Download verified desktop and new hardware
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HARDWARE_RUN: ${{ steps.pins.outputs.hardware_run }}
+          HARDWARE_COMMIT: ${{ steps.pins.outputs.orchard_commit }}
+          HARDWARE_ARTIFACT: ${{ steps.pins.outputs.hardware_artifact }}
+          HARDWARE_SHA256: ${{ steps.pins.outputs.hardware_sha256 }}
+        run: |
+          python ci/fetch-test-artifact.py --repo stuart902/omarchy-a --run 41717404430 --commit 626e651e12d928d8a6e9b6eb478962f8e0696380 --artifact 13272170021 --sha256 c49c27c23e8d8f7b835bb9dceb7ccd5050d397eec7f2d50a4fab996da40cdcf0 --output out/previous
+          python ci/fetch-test-artifact.py --repo stuart902/omarchy-a --run 41580018324 --commit 90b7222309461fb4531c468e66c9cd40735c6707 --artifact 13205705653 --sha256 37104e1fa42855a77c4ef81fab90ba6fe4e155cd8af227fe9254fb27bafc680a --output out/downloads
+          python ci/fetch-test-artifact.py --repo stuart902/omarchy-a --run 41580018324 --commit 90b7222309461fb4531c468e66c9cd40735c6707 --artifact 13205213896 --sha256 83a5b3e54408892ffa8eb3c40091ade084f3cbd9d403e947c994157571a2e246 --output out/downloads
+          python ci/fetch-test-artifact.py --repo stuart902/orchard --run "$HARDWARE_RUN" --commit "$HARDWARE_COMMIT" --artifact "$HARDWARE_ARTIFACT" --sha256 "$HARDWARE_SHA256" --output out/hardware
+          (cd out/previous && sha256sum --check --strict SHA256SUMS)
+          (cd out/hardware && sha256sum --check --strict SHA256SUMS)
+      - name: Cryptographically verify hardware provenance before staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HARDWARE_COMMIT: ${{ steps.pins.outputs.orchard_commit }}
+        run: |
+          python ci/verify-hardware-attestations.py out/hardware --commit "$HARDWARE_COMMIT" --output out/hardware-attestation-verification.json
+      - name: Stage and audit exact inputs
+        run: |
+          mkdir -p out/platform
+          tar -xzf out/hardware/apple-16k-components.tar.gz -C out/platform
+          cmp out/hardware/integration-receipt.json out/platform/components/integration-receipt.json
+          cmp out/hardware/reuse-receipt.json out/platform/components/reuse-receipt.json
+          cmp out/hardware/resolved-16k.config out/platform/components/resolved.config
+          cmp out/hardware/m1n1.bin out/platform/components/quiet/m1n1.bin
+          cmp out/hardware/pongo.bin out/platform/components/quiet/pongo.bin
+          tar -xzf out/downloads/omarchy-userspace.tar.gz -C out
+          tar -xzf out/downloads/boot-inputs.tar.gz -C out
+          python ci/audit-capture-rootfs.py out/base/rootfs.tar.gz
+          python ci/normalize-recovery-tools.py --archive out/base/rootfs.tar.gz --receipt out/base/rootfs.tar.gz.json
+          python ci/audit-capture-platform.py out/platform/components/kernel
+          python ci/audit-audio-kernel-consistency.py out/platform/components/kernel --pins ci/audio-desktop-inputs.json --receipt out/platform/components/integration-receipt.json
+      - name: Assemble only the platform and recovery; preserve desktop root bytes
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          . .venv/bin/activate
+          python ci/assemble-audio-desktop.py --source-release out/previous --hardware out/platform \
+            --base out/base/rootfs.tar.gz --base-receipt out/base/rootfs.tar.gz.json \
+            --logo out/boot/artwork/logo.bin --orchard .orchard --output out/release \
+            --release "preview-audio-nov4-$RUN_ID"
+          python -m release.audit out/release/release.toml
+          python -m orchard.manifests --verify-local out/release/index.toml
+          python ci/audit-capture-platform.py out/platform/components/kernel --layer out/release/platform-apple-16k.tar.gz
+          python ci/audit-audio-kernel-consistency.py out/platform/components/kernel --orchard .orchard --layer out/release/platform-apple-16k.tar.gz --pins ci/audio-desktop-inputs.json --receipt out/platform/components/integration-receipt.json
+          python -m orchard.installer release out/release --pongo out/platform/components/quiet/pongo.bin --m1n1 out/platform/components/quiet/m1n1.bin
+          cmp out/previous/rootfs.tar.zst out/release/rootfs.tar.zst
+          cmp out/previous/rootfs.json out/release/rootfs.json
+      - name: Package sources and provenance without publishing a release
+        run: |
+          mkdir -p out/publication
+          cp -a out/release/. out/publication/
+          cp out/hardware/orchard-build.sigstore.jsonl out/publication/
+          cp out/hardware-attestation-verification.json out/publication/
+          cp out/hardware/SHA256SUMS out/publication/hardware-SHA256SUMS
+          for source in kernel-source-apple-16k.tar.gz orchard-source.tar.gz reused-orchard-source.tar.gz recovery-tool-source.tar.gz m1n1-source.tar.gz pongo-source.tar.gz; do
+            test -s "out/hardware/$source"
+            cp "out/hardware/$source" out/publication/
+          done
+          cp out/platform/components/integration-receipt.json out/platform/components/reuse-receipt.json out/publication/
+          cp out/platform/components/resolved.config out/publication/kernel-apple-16k.config
+          cp ci/audio-desktop-inputs.json out/publication/
+          cp ci/audio-desktop-README.md out/publication/TEST-README.md
+          # Preserve the corresponding source for the reused root separately.
+          test -s out/previous/omarchy-linux-source.tar.gz
+          cp out/previous/omarchy-linux-source.tar.gz out/publication/reused-desktop-source.tar.gz
+          python - <<'PYORIGIN'
+          import hashlib, json
+          from pathlib import Path
+          def sha(name):
+              with Path(name).open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+          record = {'repository': 'stuart902/omarchy-a', 'commit': '626e651e12d928d8a6e9b6eb478962f8e0696380',
+                    'run': 41717404430, 'artifact': 13272170021,
+                    'artifact_sha256': 'c49c27c23e8d8f7b835bb9dceb7ccd5050d397eec7f2d50a4fab996da40cdcf0',
+                    'root_sha256': sha('out/publication/rootfs.tar.zst'),
+                    'root_receipt_sha256': sha('out/publication/rootfs.json'),
+                    'corresponding_source': 'reused-desktop-source.tar.gz',
+                    'source_sha256': sha('out/publication/reused-desktop-source.tar.gz')}
+          Path('out/publication/reused-desktop-origin.json').write_text(json.dumps(record, indent=2) + '\n')
+          PYORIGIN
+          git archive --format=tar.gz -o out/publication/omarchy-linux-source.tar.gz HEAD
+          cmp out/hardware/integration-receipt.json out/publication/integration-receipt.json
+          cmp out/hardware/reuse-receipt.json out/publication/reuse-receipt.json
+          cmp out/hardware/resolved-16k.config out/publication/kernel-apple-16k.config
+          cmp out/hardware/orchard-build.sigstore.jsonl out/publication/orchard-build.sigstore.jsonl
+          cmp out/previous/rootfs.tar.zst out/publication/rootfs.tar.zst
+          cmp out/previous/rootfs.json out/publication/rootfs.json
+          cmp out/previous/omarchy-linux-source.tar.gz out/publication/reused-desktop-source.tar.gz
+          python ci/audit-audio-kernel-consistency.py out/platform/components/kernel --orchard .orchard --layer out/publication/platform-apple-16k.tar.gz --pins out/publication/audio-desktop-inputs.json --receipt out/publication/integration-receipt.json
+          (cd out/publication && sha256sum ./* > ../SHA256SUMS && mv ../SHA256SUMS .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-j71b-audio-nov4-desktop-assets
+          path: out/publication/*
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-j71b-audio-nov4-desktop-audit
+          path: |
+            out/publication/*.json
+            out/publication/*.jsonl
+            out/publication/hardware-SHA256SUMS
+            out/publication/*.toml
+            out/publication/*.config
+            out/publication/SHA256SUMS
+            out/publication/TEST-README.md
+          retention-days: 14
+          if-no-files-found: error
