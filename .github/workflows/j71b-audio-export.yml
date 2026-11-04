@@ -1,0 +1,107 @@
+name: Export verified J71b installer ZIP in downloadable parts
+on:
+  push:
+    branches: [ci/j71b-audio-export-nov4]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Verify and split the existing installer ZIP without rebuilding it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, urllib.request
+          REPO = 'stuart902/omarchy-a'
+          RUN = 41918815273
+          COMMIT = '8baa3817bf2e3d5225d2e8d92c2d39ddb79d3459'
+          ARTIFACT = 13367355310
+          SIZE = 1229286959
+          SHA = '5e638be5b8db7d3be590214bf5e7596c245daaf7fb34c7fa6c9964fef4deba39'
+          PART_SIZE = 480 * 1024 * 1024
+          api = 'https://api.github.com/repos/' + REPO
+          token = os.environ['GH_TOKEN']
+          def get(path):
+              request = urllib.request.Request(api + path, headers={
+                  'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=60) as stream:
+                  return json.load(stream)
+          run = get('/actions/runs/' + str(RUN))
+          artifact = get('/actions/artifacts/' + str(ARTIFACT))
+          if (run['head_sha'] != COMMIT or run['status'] != 'completed' or
+                  run['conclusion'] != 'success'):
+              raise SystemExit('Source run identity/status mismatch')
+          if (artifact['id'] != ARTIFACT or artifact['expired'] or artifact['size_in_bytes'] != SIZE or
+                  artifact['digest'] != 'sha256:' + SHA or artifact['workflow_run']['id'] != RUN or
+                  artifact['workflow_run']['head_sha'] != COMMIT or
+                  artifact['name'] != 'omarchy-j71b-audio-nov4-desktop-assets'):
+              raise SystemExit('Source artifact identity/digest mismatch')
+          output = pathlib.Path('out')
+          output.mkdir()
+          archive = output / 'installer-original.zip'
+          # The token is passed on stdin, never in command arguments or exception messages.
+          result = subprocess.run(['curl', '--config', '-', '--fail', '--location', '--retry', '2',
+              '--silent', '--show-error', '--max-time', '1200',
+              api + '/actions/artifacts/' + str(ARTIFACT) + '/zip', '-o', str(archive)],
+              input='header = "Authorization: Bearer ' + token + '"\n', text=True)
+          if result.returncode:
+              raise SystemExit('Artifact download failed; curl exit ' + str(result.returncode))
+          with archive.open('rb') as stream:
+              digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          if archive.stat().st_size != SIZE or digest != SHA:
+              raise SystemExit('Downloaded ZIP size/hash mismatch')
+          parts = []
+          reconstructed = hashlib.sha256()
+          with archive.open('rb') as source:
+              index = 0
+              while data := source.read(PART_SIZE):
+                  index += 1
+                  name = f'installer-original.zip.part{index:02d}'
+                  destination = output / f'part{index:02d}'
+                  destination.mkdir()
+                  path = destination / name
+                  path.write_bytes(data)
+                  reconstructed.update(data)
+                  parts.append({'name': name, 'artifact_name': f'j71b-audio-installer-zip-part{index:02d}',
+                                'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+          if len(parts) != 3 or sum(p['bytes'] for p in parts) != SIZE or reconstructed.hexdigest() != SHA:
+              raise SystemExit('Split/reconstruction integrity mismatch')
+          manifest = {'schema': 1, 'repository': REPO, 'source_run': RUN, 'source_commit': COMMIT,
+                      'source_artifact': ARTIFACT, 'source_name': artifact['name'],
+                      'original_zip_bytes': SIZE, 'original_zip_sha256': SHA,
+                      'part_bytes_limit': PART_SIZE, 'parts': parts,
+                      'operation': 'byte splitting only; original ZIP content unchanged'}
+          encoded = json.dumps(manifest, indent=2) + '\n'
+          for index in range(1, 4):
+              (output / f'part{index:02d}' / 'split-manifest.json').write_text(encoded)
+          print(encoded)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: j71b-audio-installer-zip-part01
+          path: out/part01/*
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: j71b-audio-installer-zip-part02
+          path: out/part02/*
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: j71b-audio-installer-zip-part03
+          path: out/part03/*
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
