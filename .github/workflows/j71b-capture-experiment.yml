@@ -158,14 +158,32 @@ jobs:
           bash experiments/j71b-capture/ci_desktop_session.sh \
             "$RUNNER_TEMP/j71b-desktop-session" \
             "$RUNNER_TEMP/j71b-desktop-session-logs"
+      - name: Stage diagnostic logs, never audio samples
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import os
+          from pathlib import Path
+          import shutil
+
+          source = Path(os.environ['RUNNER_TEMP']) / 'j71b-desktop-session-logs'
+          destination = Path('experiments/j71b-capture/build/session-diagnostics')
+          destination.mkdir(parents=True, exist_ok=True)
+          for path in source.rglob('*'):
+              if path.is_symlink() or not path.is_file():
+                  continue
+              if path.suffix not in {'.log', '.txt', '.json'}:
+                  continue
+              target = destination / path.relative_to(source)
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(path, target)
+          PYCODE
       - name: Preserve diagnostic logs, never audio samples
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: j71b-synthetic-session-${{ matrix.runner }}
-          path: |
-            ${{ runner.temp }}/j71b-desktop-session-logs/**/*.log
-            ${{ runner.temp }}/j71b-desktop-session-logs/**/*.txt
-            ${{ runner.temp }}/j71b-desktop-session-logs/**/*.json
+          path: experiments/j71b-capture/build/session-diagnostics
           if-no-files-found: warn
           retention-days: 7

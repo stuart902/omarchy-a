@@ -35,7 +35,7 @@ def load_runtime():
 
 
 def props(obj):
-    return obj.get('info', {}).get('props', {})
+    return obj.get('info', {}).get('props', obj.get('props', {}))
 
 
 def nodes(data, name):
@@ -465,6 +465,13 @@ def main():
             print('PASS:', name, flush=True)
         except Exception as error:
             reports.append({'case': name, 'status': 'failed', 'error': str(error)})
+            for log in session.root.glob('*.log'):
+                print(log.name + ':\n' + log.read_text(errors='replace')[-4000:], flush=True)
+            graph = session.root / 'timeout-graph.json'
+            if graph.exists():
+                for obj in json.loads(graph.read_text()):
+                    if obj['type'].endswith(('Node', 'Metadata', 'Link')):
+                        print(json.dumps(obj), flush=True)
             raise
         finally:
             session.close()
