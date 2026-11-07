@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# omarchy:summary=Install an application and request its desktop launch
+# omarchy:args=<display-name> <space-separated-packages> <desktop-id>
+
+set -euo pipefail
+
+if (($# != 3)) || [[ -z $1 || -z $3 ]]; then
+  echo 'Usage: omarchy-install-and-launch <display-name> <space-separated-packages> <desktop-id>' >&2
+  exit 2
+fi
+IFS=$' \t\n' read -r -d '' -a packages <<< "$2" || true
+if ((${#packages[@]} == 0)); then
+  echo 'At least one package is required.' >&2
+  exit 2
+fi
+
+printf -v command 'printf "Installing %%s\\n" %q; omarchy-pkg-add' "$1"
+printf -v package_args ' %q' "${packages[@]}"
+command+=$package_args
+# Wait for gtk-launch's immediate result, but give the application a separate
+# session so closing a successful install terminal does not send it SIGHUP.
+printf -v launch ' && setsid --fork --wait gtk-launch -- %q && printf "Launch requested for %%s.\\n" %q' "$3" "$1"
+command+=$launch
+exec omarchy-launch-floating-terminal-with-presentation "$command"
