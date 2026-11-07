@@ -23,6 +23,7 @@ import tempfile
 import time
 import traceback
 import unittest
+from unittest.mock import Mock, patch
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -128,6 +129,9 @@ def child(directory, mode):
 
 def worker(directory, mode):
     require_ci()
+    # Count every launch, including a retry rejected by OwnershipGuard.check().
+    # The manager may garbage-collect successful units and lose start history.
+    record(directory, 'worker-invocation')
     runtime = load_runtime()
     runtime.STOP = False
 
@@ -248,13 +252,58 @@ def assert_lifecycle(properties):
 
 
 def read_events(directory):
-    return [json.loads(line) for line in (directory / 'events.jsonl').read_text().splitlines()]
+    path = directory / 'events.jsonl'
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
-def run_case(manager, directory, name, mode):
+def assert_no_restart(before, final, events, mode):
+    assert final['Restart'] == 'no' and final['NRestarts'] == '0', final
+    expected_state = 'inactive' if mode == 'healthy' else 'failed'
+    assert final['ActiveState'] == expected_state, final
+    original_pid = int(before['MainPID'])
+    assert original_pid > 0 and int(before['ExecMainStartTimestampMonotonic']) > 0, before
+    for event_name in ('worker-invocation', 'main-start'):
+        launches = [event for event in events if event['event'] == event_name]
+        assert len(launches) == 1 and launches[0]['pid'] == original_pid, (event_name, launches)
+    timestamp = final['ExecMainStartTimestampMonotonic']
+    if timestamp == '0':
+        # Observed on systemd 255: a successfully stopped unit is collected,
+        # and a later show reloads it with no runtime history. Permit that
+        # only with an independently recorded single clean worker invocation.
+        assert mode == 'healthy', ('Failed unit lost start history', final)
+        for key, value in {'SubState': 'dead', 'Result': 'success',
+                           'MainPID': '0', 'ControlGroup': ''}.items():
+            assert final[key] == value, (key, final)
+        clean = [event for event in events if event['event'] == 'clean-stop']
+        assert len(clean) == 1 and clean[0]['pid'] == original_pid, clean
+    else:
+        assert timestamp == before['ExecMainStartTimestampMonotonic'], ('Unit restarted', before, final)
+    if mode != 'hung-main':
+        assert final['MainPID'] == '0', ('Stopped unit has a new main process', final)
+
+
+def observe_case(manager, directory, name, phase, report):
+    """Persist evidence before assertions so an unexpected result is actionable."""
+    properties = manager.show(name)
+    report[phase] = properties
+    details = {'events': read_events(directory),
+               'ownership_marker': (directory / 'state/ownership.json').exists()}
+    pid_path = directory / 'child.pid'
+    if pid_path.exists():
+        pid = int(pid_path.read_text())
+        details.update(child_pid=pid, child_state=process_state(pid))
+    if 'before' in report:
+        pid = int(report['before']['MainPID'])
+        details.update(original_main_pid=pid, original_main_state=process_state(pid))
+    report[phase + '_observations'] = details
+    (directory / 'result.json').write_text(json.dumps(report, indent=2))
+    return properties
+
+
+def exercise_case(manager, directory, name, mode, report):
     manager.run('start', name)
     wait_for(lambda: (directory / 'ready').exists(), mode + ' fixture ready')
-    before = manager.show(name)
+    before = observe_case(manager, directory, name, 'before', report)
     assert_lifecycle(before)
     assert before['ActiveState'] == 'active', before
     pid = int((directory / 'child.pid').read_text())
@@ -269,7 +318,8 @@ def run_case(manager, directory, name, mode):
         if mode == 'healthy':
             assert result.returncode == 0, result.stderr
     elapsed = time.monotonic() - started
-    after = manager.show(name)
+    report['stop_elapsed_seconds'] = elapsed
+    after = observe_case(manager, directory, name, 'after', report)
     assert_lifecycle(after)
     marker = directory / 'state/ownership.json'
     if mode == 'healthy':
@@ -305,9 +355,11 @@ def run_case(manager, directory, name, mode):
         assert main_signals == ['SIGTERM'], main_signals
     # No automatic restart after success, explicit stop, or unexpected failure.
     time.sleep(2)
-    final = manager.show(name)
-    assert final['NRestarts'] == '0' and final['ExecMainStartTimestampMonotonic'] == before['ExecMainStartTimestampMonotonic']
-    assert sum(event['event'] == 'main-start' for event in read_events(directory)) == 1
+    final = observe_case(manager, directory, name, 'final', report)
+    assert_lifecycle(final)
+    assert_no_restart(before, final, read_events(directory), mode)
+    if mode != 'hung-main':
+        assert process_state(int(before['MainPID'])) is None, 'Stopped main process is still alive'
     if mode == 'hung-main':
         runtime = load_runtime()
         try:
@@ -324,10 +376,25 @@ def run_case(manager, directory, name, mode):
                 assert 'Previous microphone ownership was not cleared' in str(error)
             else:
                 raise AssertionError('Ownership retry was not blocked')
-    return {'case': mode, 'status': 'passed', 'before': before, 'after': after,
-            'final': final, 'stop_elapsed_seconds': elapsed,
-            'observation_seconds': time.monotonic() - started,
-            'child_signals': child_signals, 'main_signals': main_signals}
+    report.update(status='passed', stop_elapsed_seconds=elapsed,
+                  observation_seconds=time.monotonic() - started,
+                  child_signals=child_signals, main_signals=main_signals)
+
+
+def run_case(manager, directory, name, mode):
+    report = {'case': mode, 'unit': name, 'status': 'running'}
+    try:
+        exercise_case(manager, directory, name, mode, report)
+    except Exception as error:
+        report.update(status='failed', error=f'{type(error).__name__}: {error}',
+                      traceback=traceback.format_exc())
+        traceback.print_exc()
+        try:
+            observe_case(manager, directory, name, 'failure', report)
+        except Exception as diagnostic_error:
+            report['diagnostic_error'] = f'{type(diagnostic_error).__name__}: {diagnostic_error}'
+    (directory / 'result.json').write_text(json.dumps(report, indent=2))
+    return report
 
 
 def run_suite(directory):
@@ -392,7 +459,10 @@ def run_suite(directory):
         for mode, name in names.items():
             report = run_case(manager, directory / mode, name, mode)
             reports.append(report)
-            print('PASS:', mode, flush=True)
+            (directory / 'results.json').write_text(json.dumps(reports, indent=2))
+            print('PASS:' if report['status'] == 'passed' else 'FAIL:', mode, flush=True)
+            # All units have separate process cgroups, state and event files.
+            # A failed assertion must not hide the other independent cases.
         assert manager.show(production)['ActiveState'] == 'inactive'
         assert hashlib.sha256(UNIT.read_bytes()).hexdigest() == digest, 'Production unit changed'
     except Exception as error:
@@ -438,6 +508,57 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(quote('some path/$arg%value"'), '"some path/$$arg%%value\\""')
         with self.assertRaises(ValueError):
             quote('newline\n')
+
+    @staticmethod
+    def restart_evidence():
+        before = {'MainPID': '2471', 'ExecMainStartTimestampMonotonic': '147731224'}
+        final = {'Restart': 'no', 'NRestarts': '0', 'ActiveState': 'inactive',
+                 'SubState': 'dead', 'Result': 'success', 'MainPID': '0',
+                 'ControlGroup': '', 'ExecMainStartTimestampMonotonic': '0'}
+        events = [{'event': name, 'pid': 2471}
+                  for name in ('worker-invocation', 'main-start', 'clean-stop')]
+        return before, final, events
+
+    def test_successful_unit_collection_preserves_no_restart_evidence(self):
+        before, final, events = self.restart_evidence()
+        assert_no_restart(before, final, events, 'healthy')
+        final['ExecMainStartTimestampMonotonic'] = before['ExecMainStartTimestampMonotonic']
+        assert_no_restart(before, final, events, 'healthy')
+
+    def test_collected_unit_does_not_hide_a_blocked_second_invocation(self):
+        before, final, events = self.restart_evidence()
+        # A second launch can fail before main-start at the ownership guard.
+        events.append({'event': 'worker-invocation', 'pid': 2500})
+        with self.assertRaises(AssertionError):
+            assert_no_restart(before, final, events, 'healthy')
+
+    def test_no_restart_requires_state_process_and_start_history(self):
+        before, final, events = self.restart_evidence()
+        for change in ({'NRestarts': '1'}, {'Restart': 'on-failure'}, {'ActiveState': 'active'},
+                       {'MainPID': '2500'}, {'ControlGroup': '/still-alive'},
+                       {'ExecMainStartTimestampMonotonic': '147731225'}, {'Result': 'exit-code'}):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                assert_no_restart(before, {**final, **change}, events, 'healthy')
+        with self.assertRaises(AssertionError):
+            assert_no_restart(before, final, events[:-1], 'healthy')
+        with self.assertRaises(AssertionError):
+            assert_no_restart(before, {**final, 'ActiveState': 'failed'}, events, 'fault')
+        final.update(ActiveState='failed', ExecMainStartTimestampMonotonic='147731224')
+        assert_no_restart(before, final, events, 'fault')
+
+    def test_failed_case_saves_diagnostics_without_aborting_other_cases(self):
+        manager = Mock()
+        manager.show.return_value = {'ActiveState': 'failed', 'MainPID': '0'}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with patch(__name__ + '.exercise_case', side_effect=AssertionError('test failure')), \
+                    patch.object(traceback, 'print_exc'):
+                report = run_case(manager, directory, 'fixture.service', 'fault')
+            self.assertEqual(report['status'], 'failed')
+            self.assertEqual(report['error'], 'AssertionError: test failure')
+            self.assertEqual(report['failure'], manager.show.return_value)
+            self.assertIn('traceback', report)
+            self.assertEqual(json.loads((directory / 'result.json').read_text()), report)
 
 
 def main():
