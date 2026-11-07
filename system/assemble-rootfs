@@ -31,7 +31,10 @@ umask 022
 mkdir -p "$root/var/lib/pacman" "$root/var/cache/pacman/pkg" "$root/etc"
 # The image's mirror order was measured when it was built: measure again.
 "$project/system/rank-mirrors"
-pacman --root "$root" --gpgdir /etc/pacman.d/gnupg -Sy --noconfirm "${requested[@]}"
+# Download into the target's package cache with bounded, retried attempts that
+# move on to the next mirror, then install from that cache.
+"$project/system/pacman-download" --root "$root" --gpgdir /etc/pacman.d/gnupg -Sy --noconfirm "${requested[@]}"
+pacman --root "$root" --gpgdir /etc/pacman.d/gnupg -S --noconfirm "${requested[@]}"
 # wlroots0.20 replaces Arch's build of the same version: fast rotated pixman compositing.
 for package in "$desktop/packages/omafox.pkg.tar.xz" "$desktop/packages/omacalc.pkg.tar.zst" "$desktop/packages/wlroots0.20.pkg.tar.xz"; do
   pacman --root "$root" --gpgdir /etc/pacman.d/gnupg --noconfirm -U "$package"
@@ -47,10 +50,11 @@ usermod --root "$root" --append --groups seat,video,input greeter
 cp -a --no-preserve=ownership "$desktop/payload/." "$root/"
 chown -R 1000:1000 "$root/home/tablet"
 install -d "$root/etc/systemd/system"
-for unit in sleep suspend hibernate hybrid-sleep suspend-then-hibernate; do
+# Suspend stays possible; orchard allows it per board. Hibernation never is.
+for unit in hibernate hybrid-sleep suspend-then-hibernate; do
   ln -s /dev/null "$root/etc/systemd/system/$unit.target"
 done
-systemctl --root="$root" enable greetd.service NetworkManager.service bluetooth.service seatd.service
+systemctl --root="$root" enable greetd.service NetworkManager.service bluetooth.service seatd.service systemd-timesyncd.service
 : > "$root/etc/machine-id"
 # Without a static name, NetworkManager adopts the network's reverse DNS
 # name and BlueZ advertises "archlinux" to accessories.

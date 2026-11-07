@@ -20,6 +20,7 @@ work, with an on-screen display.
 
 ### Desktop
 
+- Fix the System menu’s Shutdown and Reboot actions.
 - Automatic rotation on the iPad 6 through iio-sensor-proxy, using orchard's
   in-kernel accelerometer driver; rotation waits for the device to settle, and
   touch follows the panel. Based on Dalton Alexandre's rotation work.
@@ -27,6 +28,16 @@ work, with an on-screen display.
 - Volume starts quiet; the volume keys step in 5% steps and show the shell's
   on-screen display; the mixer is in the bar.
 - No leftover boot splash between the greeter and the desktop.
+- Power locks and darkens the screen at once; the iPad sleeps 10 s later. One
+  press wakes it, in well under a second, and Home wakes it too.
+- Plugging in lights the screen.
+- The greeter and the lock screen go dark after 30 s without input, the desktop
+  after 5 minutes.
+
+### Build
+
+- Package downloads survive a stalling mirror: bounded download attempts move
+  on to the next mirror and keep what was already downloaded.
 
 ## [0.2.0] - 2026-10-31
 
