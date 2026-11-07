@@ -141,6 +141,7 @@ jobs:
           dpkg-query -W meson python3-numpy libsndfile1-dev libglib2.0-dev \
             liblua5.4-dev dbus-daemon dbus-bin
       - uses: actions/checkout@v4
+        id: checkout
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -148,9 +149,10 @@ jobs:
         shell: bash
         env:
           SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          CHECKOUT_COMMIT: ${{ steps.checkout.outputs.commit }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$CHECKOUT_COMMIT" = "$SOURCE_COMMIT"
           printf 'Repository commit: %s\n' "$SOURCE_COMMIT" \
             > "$RUNNER_TEMP/j71b-desktop-session-logs/checkout.txt"
           bash experiments/j71b-capture/ci_desktop_session.sh \
