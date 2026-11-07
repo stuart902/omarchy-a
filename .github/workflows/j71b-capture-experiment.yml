@@ -48,6 +48,7 @@ jobs:
           python3 fixture_config.py build/j71b-capture.so > build/fixture.conf
           # Real sessions run separately in the bounded synthetic-session job.
           python3 -m py_compile test_desktop_session.py
+          python3 test_systemd_lifecycle.py --self-test
       - name: Test desktop lifecycle and packaging policy without a daemon
         run: python3 -m unittest discover -s tests -p 'test_j71b*.py' -v
       - name: Verify native rootfs microphone compilation
@@ -180,5 +181,40 @@ jobs:
         with:
           name: j71b-synthetic-session-${{ matrix.runner }}
           path: experiments/j71b-capture/build/session-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+  systemd-lifecycle:
+    # A real, ALREADY RUNNING user manager on a disposable hosted VM. This
+    # uses only inert process fixtures, never audio/USB interfaces or a real
+    # PipeWire service. No sudo, linger, manager bootstrap, container privilege
+    # flags, host mounts or security-setting changes are permitted. Absence of
+    # the existing manager is a reported blocker, not a reason to create one.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        id: checkout
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Qualify existing user-manager lifecycle with synthetic processes
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          CHECKOUT_COMMIT: ${{ steps.checkout.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$CHECKOUT_COMMIT" = "$SOURCE_COMMIT"
+          python3 experiments/j71b-capture/test_systemd_lifecycle.py --self-test
+          timeout --signal=TERM --kill-after=10s 180s \
+            python3 experiments/j71b-capture/test_systemd_lifecycle.py \
+              --run-existing-user-manager \
+              --output-directory "$RUNNER_TEMP/j71b-systemd-lifecycle"
+      - name: Preserve lifecycle diagnostics, never audio
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: j71b-systemd-lifecycle-ubuntu-24.04
+          path: ${{ runner.temp }}/j71b-systemd-lifecycle
           if-no-files-found: warn
           retention-days: 7

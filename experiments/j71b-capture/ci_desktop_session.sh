@@ -82,6 +82,7 @@ fetch_pinned() {
 }
 fetch_pinned pipewire "$pipewire_version" "$pipewire_commit"
 fetch_pinned wireplumber "$wireplumber_version" "$wireplumber_commit"
+python3 "$experiment_dir/test_audiotestsrc_clock.py" "$build_dir/pipewire"
 
 multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
 # No ALSA/Bluetooth/camera/device monitors, daemon service units, realtime/PAM

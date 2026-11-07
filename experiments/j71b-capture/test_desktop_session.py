@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / 'system/overlay/usr/lib/omarchy-j71b-microphone/desktop_mic.py'
 FALLBACK = 'j71b.test.other-source'
 REMOTE = 'pipewire-0'
+DRIVER = 'Dummy-Driver'
 
 
 def load_runtime():
@@ -83,9 +84,15 @@ def server_config(runtime):
         'context.modules': [{'name': 'libpipewire-module-' + name} for name in
                             ('protocol-native', 'client-node', 'adapter',
                              'link-factory', 'spa-node-factory', 'metadata', 'access')],
+        # The test generator's live-driver timer stays stopped after buffer
+        # starvation in PipeWire 1.6.10. Use its supported follower mode with
+        # the normal dummy clock. Rules override the factory's advertised
+        # driver=true; adapter args alone are overwritten by that advertisement.
+        'node.rules': [{'matches': [{'node.name': runtime.SOURCE}, {'node.name': FALLBACK}],
+                        'actions': {'update-props': {'node.driver': False}}}],
         'context.objects': [
             {'factory': 'spa-node-factory', 'args': {
-                'factory.name': 'support.node.driver', 'node.name': 'Dummy-Driver',
+                'factory.name': 'support.node.driver', 'node.name': DRIVER,
                 'node.group': 'pipewire.dummy', 'priority.driver': 20000}},
             synthetic(runtime.SOURCE, 100), synthetic(FALLBACK, 2000)]}
 
@@ -216,6 +223,8 @@ wireplumber.profiles = {
         data = self.await_graph(lambda d: default_source(d) == FALLBACK,
                                 'WirePlumber selects synthetic fallback default')
         raw = nodes(data, self.runtime.SOURCE)[0]
+        for name in (self.runtime.SOURCE, FALLBACK):
+            assert props(nodes(data, name)[0]).get('node.driver') is False
         self.source_id, self.serial = raw['id'], str(props(raw)['object.serial'])
         # The adapter forwards volume to audiotestsrc and also applies it.
         # Leave ample nonzero signal for both raw and +12 dB conditioned PCM.
@@ -265,7 +274,7 @@ def check_idle(session):
     def idle(data):
         return all(len(nodes(data, name)) == 1
                    and nodes(data, name)[0]['info']['state'] in ('idle', 'suspended')
-                   for name in (session.runtime.SOURCE, session.runtime.CAPTURE, session.runtime.OUTPUT))
+                   for name in (session.runtime.SOURCE, session.runtime.CAPTURE, session.runtime.OUTPUT, DRIVER))
     session.await_graph(idle, 'raw and conditioned nodes idle', seconds=12)
     for _ in range(3):
         assert idle(session.dump()), 'Unexpected capture without consumers'
@@ -326,7 +335,9 @@ def record(session, rate, channels, name, use_default=False):
     child, path = recorder(session, name, None if use_default else session.runtime.OUTPUT, rate, channels)
     session.await_graph(lambda d: nodes(d, session.runtime.OUTPUT)[0]['info']['state'] == 'running',
                         'recorder activates conditioned source')
-    _, _, count, other = session.runtime.validate_graph(session.dump(), session.serial)
+    graph = session.dump()
+    raw, _, count, other = session.runtime.validate_graph(graph, session.serial)
+    assert str(props(raw).get('node.driver-id')) == str(nodes(graph, DRIVER)[0]['id'])
     assert count >= 1 and other == 0
     time.sleep(.6)
     result = finish_recording(session, child, path, rate, channels)

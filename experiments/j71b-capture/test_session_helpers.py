@@ -1,10 +1,18 @@
 """Pure helper checks for the CI session harness; never launch a process."""
 import unittest
+from types import SimpleNamespace
 
-from test_desktop_session import FALLBACK, client_config, consumer_routes_ready, default_source, props
+from test_desktop_session import FALLBACK, client_config, consumer_routes_ready, default_source, props, server_config
 
 
 class SessionHelpers(unittest.TestCase):
+    def test_only_synthetic_sources_use_follower_clock(self):
+        config = server_config(SimpleNamespace(SOURCE='synthetic-raw'))
+        self.assertEqual(config['node.rules'], [{
+            'matches': [{'node.name': 'synthetic-raw'}, {'node.name': FALLBACK}],
+            'actions': {'update-props': {'node.driver': False}}}])
+        self.assertNotIn('always-process', str(config))
+
     def test_consumer_routes_follow_actual_ports_not_pcm_channel_count(self):
         data = [
             {'id': i, 'type': 'PipeWire:Interface:Node',

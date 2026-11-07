@@ -119,3 +119,12 @@ filter. Only diagnostic logs are retained, never audio samples. Forced cleanup
 of synthetic fixtures happens after assertions and is not production recovery.
 Real systemd user-manager behavior, desktop GUI selection, ARM scheduling
 deadlines and hardware safety remain separate qualification requirements.
+
+The synthetic generator is externally clocked by PipeWire's dummy driver.
+In PipeWire 1.6.10, a live `audiotestsrc` acting as its own driver disarms its
+timer after buffer starvation and does not restart it when buffers return.
+Retained failing CI logs and a socket-free regression against the unchanged
+SPA source reproduce this path. The same regression verifies recovery with
+an external clock. Exact-name server rules select follower mode for only the
+two synthetic sources. No upstream engine or production microphone setting
+is patched, and the session tests require the source and clock to become idle.
