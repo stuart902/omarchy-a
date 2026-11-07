@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Enable signed, rolling OPR packages in a new aarch64 image. Never change the
+# builder's pacman configuration or trust store, or ship its private local key.
+set -euo pipefail
+
+[[ $# == 1 && -d $1 && $(realpath -- "$1") != / ]] || {
+  echo 'Usage: configure-omarchy-repository NEW-ROOT' >&2; exit 2;
+}
+root=$(realpath -- "$1")
+here=$(cd "$(dirname "$0")" && pwd)
+config=$root/etc/pacman.conf
+fingerprint=40DFB630FF42BCFFB047046CF0134EE680CAC571
+
+[[ $(pacman-conf --config "$config" Architecture) == aarch64 ]] || {
+  echo 'OPR requires an aarch64 Arch Linux ARM target' >&2; exit 1;
+}
+if pacman-conf --config "$config" --repo-list | grep -qx omarchy; then
+  echo 'OPR is already configured in the target' >&2; exit 1;
+fi
+
+work=$(mktemp -d)
+cleanup() {
+  gpgconf --homedir "$work/gnupg" --kill gpg-agent 2>/dev/null || true
+  rm -rf -- "$work"
+}
+trap cleanup EXIT
+install -d -m 700 "$work/gnupg"
+# Trust a reviewed publisher identity, not a package version or a keyserver's
+# response. This is the same key used for the existing signed Omacalc input.
+actual=$(gpg --batch --no-options --homedir "$work/gnupg" --with-colons \
+  --show-keys "$here/omarchy-pkgs.asc" | awk -F: '
+    $1 == "pub" { primary = 1; next }
+    $1 == "fpr" && primary { print $10; primary = 0 }')
+[[ $actual == "$fingerprint" ]] || {
+  echo 'OPR bootstrap key has an unexpected fingerprint' >&2; exit 1;
+}
+pacman-key --gpgdir "$work/gnupg" --init
+pacman-key --gpgdir "$work/gnupg" --populate archlinuxarm
+pacman-key --gpgdir "$work/gnupg" --add "$here/omarchy-pkgs.asc"
+pacman-key --gpgdir "$work/gnupg" --lsign-key "$fingerprint"
+
+cat "$config" "$here/omarchy-repository.conf" > "$work/pacman.conf"
+# As in install-toolchain, the builder cannot drop to alpm through its private
+# work directory or use nested sandboxing. Keep these changes out of the image.
+sed -i '/^DownloadUser *=/d; /^CheckSpace/a DisableSandboxFilesystem\nDisableSandboxSyscalls' "$work/pacman.conf"
+args=(--config "$work/pacman.conf" --root "$root" --gpgdir "$work/gnupg")
+# Resolve the current signed keyring normally. packages.lock records the
+# selected version; no application or keyring package version is pinned.
+"$here/pacman-download" "${args[@]}" -Sy --noconfirm --needed omarchy/omarchy-keyring
+pacman "${args[@]}" -S --noconfirm --needed omarchy/omarchy-keyring
+# The package's public/trusted/revoked files initialize each device at boot.
+# Its future signed updates own those files; the bootstrap seed is build-only.
+cat "$here/omarchy-repository.conf" >> "$config"

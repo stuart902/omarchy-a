@@ -32,7 +32,9 @@ INPUTS = {
     'bluetooth': ['desktop/build-bluetooth-tools', 'desktop/bluetooth'],
     'labwc': ['desktop/build-labwc', 'desktop/labwc'],
     'base': ['system/build-rootfs', 'system/assemble-rootfs', 'system/Containerfile',
-             'system/install-toolchain', 'system/packages.txt'],
+             'system/install-toolchain', 'system/packages.txt',
+             'system/configure-omarchy-repository', 'system/omarchy-repository.conf',
+             'system/omarchy-pkgs.asc'],
     'artwork': ['boot/build-artwork', 'boot/generate-logo.py', 'boot/splash.py', 'boot/artwork'],
 }
 
