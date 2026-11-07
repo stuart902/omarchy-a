@@ -1,0 +1,70 @@
+#!/bin/bash
+
+# omarchy:summary=Run a shell command in the tablet's terminal and retain failures
+# omarchy:args=<shell-command...>
+
+set -uo pipefail
+
+if (($# == 0)) || [[ -z $* ]]; then
+  echo 'Usage: omarchy-launch-floating-terminal-with-presentation <shell-command...>' >&2
+  exit 2
+fi
+
+# Existing menu callers supply either one command string or several shell
+# fragments. Keep that interface, but pass the string as data to the runner.
+command=$*
+state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/install
+error_log=$state_dir/terminal-error.log
+work=''
+umask 077
+trap '[[ -z $work ]] || rm -rf -- "$work"' EXIT
+
+startup_error() {
+  local status=$1 message=$2 details
+  ((status != 0)) || status=1
+  details=$message
+  if mkdir -p -- "$state_dir" && {
+    printf '%s\nCommand: %s\n' "$message" "$command"
+    if [[ -n $work && -f $work/foot-error ]]; then cat -- "$work/foot-error"; fi
+  } >"$error_log"; then
+    chmod 600 -- "$error_log"
+    details+=$'\n'"Details: $error_log"
+  else
+    details+=$'\n''Could not save terminal diagnostics.'
+  fi
+  printf '%s\n' "$details" >&2
+  notify-send --urgency=critical -- 'Unable to start installer terminal' "$details" || true
+  exit "$status"
+}
+
+work=$(mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/omarchy-presentation.XXXXXXXX") ||
+  startup_error 1 'Could not create a temporary directory for the terminal.'
+
+# Foot supplies the PTY, including stdin and /dev/tty for sudo. Do not pipe the
+# command's output or use --hold: only failed commands should need dismissal.
+runner='
+printf "started\n" > "$2" || exit 1
+trap ":" INT
+printf "Running: %s\n\n" "$1"
+bash -c "$1"
+status=$?
+printf "%s\n" "$status" > "$2"
+if ((status != 0)); then
+  printf "\nCommand failed (exit %d): %s\nPress Enter to close this terminal.\n" "$status" "$1" >&2
+  read -r dismissal || true
+fi
+exit "$status"
+'
+
+foot --app-id=org.omarchy.terminal -e bash -c "$runner" -- "$command" "$work/status" 2>"$work/foot-error"
+terminal_status=$?
+result=''
+if [[ -f $work/status ]]; then result=$(cat -- "$work/status"); fi
+if [[ $result =~ ^[0-9]+$ ]]; then
+  exit "$result"
+elif [[ $result == started ]]; then
+  # The user may close the window while its command is still running.
+  ((terminal_status != 0)) || terminal_status=1
+  exit "$terminal_status"
+fi
+startup_error "$terminal_status" "Foot could not start the command (exit $terminal_status)."
