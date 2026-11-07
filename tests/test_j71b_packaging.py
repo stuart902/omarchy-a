@@ -127,6 +127,17 @@ class MicrophonePackaging(unittest.TestCase):
         self.assertIn('gcc ladspa', (mic.PROJECT / 'system/install-toolchain').read_text())
         self.assertIn('-v "$project:/repo:ro"', (mic.PROJECT / 'system/build-rootfs').read_text())
 
+    def test_native_ci_covers_rootfs_integration_changes(self):
+        workflow = (mic.PROJECT / '.github/workflows/j71b-capture-experiment.yml').read_text()
+        triggers = workflow.split('  pull_request:\n', 1)[1].split('  workflow_dispatch:', 1)[0]
+        # Each of these can change installation or validation of the native
+        # plugin without touching its DSP source or Python build helper.
+        for path in ('system/build-rootfs', 'system/assemble-rootfs',
+                     'system/install-toolchain', 'system/packages.txt',
+                     'release/public_root.py', 'tools/build.py'):
+            with self.subTest(path=path):
+                self.assertIn("      - '" + path + "'\n", triggers)
+
 
 if __name__ == '__main__':
     unittest.main()
