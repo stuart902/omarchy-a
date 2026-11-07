@@ -333,6 +333,38 @@ def filter_pid(supervisor):
     raise AssertionError('Cannot identify our supervisor filter child')
 
 
+def consumer_routes_ready(data, routes, companions):
+    """Check actual adapter ports; mono PCM may use stereo external DSP ports."""
+    names = set(routes) | set(routes.values()) | set(companions) | set(companions.values())
+    selected = {name: nodes(data, name) for name in names}
+    if any(len(found) != 1 for found in selected.values()):
+        return False
+    selected = {name: found[0] for name, found in selected.items()}
+    links = [o['info'] for o in data if o['type'].endswith(':Link')]
+    expected = {}
+    for consumer, source in routes.items():
+        node, source_id = selected[consumer], selected[source]['id']
+        expected.setdefault(source_id, set()).add(node['id'])
+        ports = {o['id'] for o in data if o['type'].endswith(':Port')
+                 and str(props(o).get('node.id')) == str(node['id'])
+                 and o.get('info', {}).get('direction') == 'input'
+                 and props(o).get('audio.channel')}
+        incoming = [link for link in links if link['input-node-id'] == node['id']]
+        if not ports or node['info']['state'] != 'running' or len(incoming) != len(ports):
+            return False
+        if {link['input-port-id'] for link in incoming} != ports:
+            return False
+        for link in incoming:
+            assert link['output-node-id'] == source_id, 'Recorder connected to wrong source'
+            assert not link.get('error'), 'Recorder link error'
+            if link['state'] != 'active':
+                return False
+    for consumer, source in companions.items():
+        expected.setdefault(selected[source]['id'], set()).add(selected[consumer]['id'])
+    return all({link['input-node-id'] for link in links if link['output-node-id'] == source}
+               == destinations for source, destinations in expected.items())
+
+
 def healthy(session):
     results = []
     for iteration in range(2):
@@ -350,7 +382,14 @@ def healthy(session):
         a, ap = recorder(session, f'concurrent-a-{iteration}', session.runtime.OUTPUT)
         b, bp = recorder(session, f'concurrent-b-{iteration}', session.runtime.OUTPUT, 16000, 1)
         raw, rp = recorder(session, f'concurrent-raw-{iteration}', session.runtime.SOURCE)
-        session.await_graph(lambda d: session.runtime.validate_graph(d, session.serial)[2:] == (3, 2),
+        def concurrent(data):
+            session.runtime.validate_graph(data, session.serial)
+            return consumer_routes_ready(data, {
+                f'j71b.test.concurrent-a-{iteration}': session.runtime.OUTPUT,
+                f'j71b.test.concurrent-b-{iteration}': session.runtime.OUTPUT,
+                f'j71b.test.concurrent-raw-{iteration}': session.runtime.SOURCE,
+            }, {session.runtime.CAPTURE: session.runtime.SOURCE})
+        session.await_graph(concurrent,
                             'simultaneous mono/stereo/raw consumers')
         time.sleep(.6)
         for proc, path, rate, channels, bounded in ((a, ap, 48000, 2, True),
