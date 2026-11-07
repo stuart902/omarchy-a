@@ -74,7 +74,7 @@ def synthetic(name, priority):
 def server_config(runtime):
     return {'context.properties': {
         'core.daemon': True, 'core.name': REMOTE, 'default.clock.rate': 48000,
-        'default.clock.quantum': 128, 'mem.allow-mlock': False},
+        'default.clock.quantum': 128, 'mem.allow-mlock': False, 'log.level': 3},
         'context.spa-libs': {
             'audio.convert.*': 'audioconvert/libspa-audioconvert',
             'support.*': 'support/libspa-support',
@@ -297,7 +297,11 @@ def finish_recording(session, child, path, rate, channels, bounded=True):
     deadline = time.monotonic() + 5
     while path.stat().st_size < rate * channels * 4 // 2:
         assert child.poll() is None, f'{path.name}: recorder exited before enough PCM'
-        assert time.monotonic() < deadline, f'{path.name}: timed out waiting for PCM'
+        if time.monotonic() >= deadline:
+            session.write('pcm-timeout-graph.json', session.dump())
+            session.write('pcm-timeout.json', {'recording': path.name,
+                          'bytes': path.stat().st_size, 'rate': rate, 'channels': channels})
+            raise AssertionError(f'{path.name}: timed out waiting for PCM ({path.stat().st_size} bytes)')
         time.sleep(.05)
     code = session.stop(child)
     assert code in (0, 1), f'Recorder failed: {code}'
@@ -436,7 +440,9 @@ def fault(session, mode):
         # Read metadata before freezing its owner. The production supervisor's
         # graph-only client does not bind metadata and remains responsive.
         session.manager.send_signal(signal.SIGSTOP)
-        session.run('pw-cli', 'destroy', str(link['id']))
+        # pw-cli binds every metadata object before commands and would wait
+        # for the frozen owner. pw-link binds only nodes/ports/links.
+        session.run('pw-link', '-d', str(link['id']))
     elif mode == 'child-exit':
         os.kill(pid, signal.SIGTERM)
     elif mode == 'server-disconnect':
@@ -515,7 +521,7 @@ def main():
         return 0
     if not args.run_isolated_session or args.output_directory is None:
         parser.error('Explicit CI session opt-in and output directory required')
-    for binary in ('pipewire', 'pw-dump', 'pw-cli', 'pw-cat', 'wpctl', 'wireplumber', 'dbus-run-session'):
+    for binary in ('pipewire', 'pw-dump', 'pw-cli', 'pw-link', 'pw-cat', 'wpctl', 'wireplumber', 'dbus-run-session'):
         if not shutil.which(binary):
             parser.error('Required dependency missing: ' + binary)
     assert args.plugin.is_file() and args.wireplumber_config.is_file()
@@ -536,8 +542,7 @@ def main():
             reports.append({'case': name, 'status': 'failed', 'error': str(error)})
             for log in session.root.glob('*.log'):
                 print(log.name + ':\n' + log.read_text(errors='replace')[-4000:], flush=True)
-            graph = session.root / 'timeout-graph.json'
-            if graph.exists():
+            for graph in session.root.glob('*timeout-graph.json'):
                 for obj in json.loads(graph.read_text()):
                     if obj['type'].endswith(('Node', 'Metadata', 'Link')):
                         print(json.dumps(obj), flush=True)

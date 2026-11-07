@@ -116,7 +116,7 @@ ldconfig
 
 # Check both compiled and dynamically linked versions at the paths serve()
 # actually uses. All required tools must be real installed executables.
-for binary in pipewire pw-dump pw-cli pw-cat; do
+for binary in pipewire pw-dump pw-cli pw-link pw-cat; do
   [[ -x /usr/bin/$binary ]]
   version=$(/usr/bin/"$binary" --version)
   printf '%s\n' "$version" | tee -a "$log_dir/runtime-versions.txt"
