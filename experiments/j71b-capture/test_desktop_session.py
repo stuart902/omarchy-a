@@ -272,10 +272,15 @@ def check_idle(session):
 def recorder(session, name, target, rate=48000, channels=2):
     path = session.root / (name + '.f32')
     stream = path.open('wb')
+    properties = {'node.name': 'j71b.test.' + name}
+    if target is not None:
+        # Pin explicit-target fixtures. With dont-fallback alone, WP's
+        # follow-default policy changes target.node to -1 and rejects them.
+        properties.update({'node.dont-fallback': True, 'node.dont-reconnect': True})
     child = session.start(name, [
         'pw-cat', '--record', '--raw', '--format=f32', f'--rate={rate}',
-        f'--channels={channels}', f'--target={target}',
-        '--properties={ node.name = j71b.test.' + name + ' node.dont-fallback = true }', '-'], stdout=stream)
+        f'--channels={channels}', *([f'--target={target}'] if target is not None else []),
+        '--properties=' + json.dumps(properties), '-'], stdout=stream)
     stream.close()
     return child, path
 
@@ -301,8 +306,8 @@ def finish_recording(session, child, path, rate, channels, bounded=True):
             'peak': float(np.max(np.abs(samples))), 'rms': rms.tolist(), 'exit': code}
 
 
-def record(session, rate, channels, name):
-    child, path = recorder(session, name, session.runtime.OUTPUT, rate, channels)
+def record(session, rate, channels, name, use_default=False):
+    child, path = recorder(session, name, None if use_default else session.runtime.OUTPUT, rate, channels)
     session.await_graph(lambda d: nodes(d, session.runtime.OUTPUT)[0]['info']['state'] == 'running',
                         'recorder activates conditioned source')
     _, _, count, other = session.runtime.validate_graph(session.dump(), session.serial)
@@ -341,6 +346,7 @@ def healthy(session):
         output_id = nodes(session.dump(), session.runtime.OUTPUT)[0]['id']
         session.run('wpctl', 'set-default', str(output_id))
         session.await_graph(lambda d: default_source(d) == session.runtime.OUTPUT, 'user-selected default')
+        results.append(record(session, 48000, 2, f'default-{iteration}', use_default=True))
         a, ap = recorder(session, f'concurrent-a-{iteration}', session.runtime.OUTPUT)
         b, bp = recorder(session, f'concurrent-b-{iteration}', session.runtime.OUTPUT, 16000, 1)
         raw, rp = recorder(session, f'concurrent-raw-{iteration}', session.runtime.SOURCE)
@@ -355,6 +361,7 @@ def healthy(session):
         session.run('wpctl', 'set-default', str(fallback_id))
         session.await_graph(lambda d: default_source(d) == FALLBACK, 'restore synthetic default')
         assert session.stop(child, signal.SIGTERM) == 0
+        assert 'malformed object array' not in (session.root / f'supervisor-{iteration}.log').read_text()
         session.removed()
         assert not session.marker.exists(), 'Healthy shutdown left ownership marker'
     return results

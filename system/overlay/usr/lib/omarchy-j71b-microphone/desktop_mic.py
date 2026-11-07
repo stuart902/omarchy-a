@@ -174,7 +174,7 @@ def private_environment(environment, directory):
         raise RuntimeError('Remove PipeWire/loader overrides before starting the microphone')
     client = filter_config(Path('/unused'), '0')
     client['context.modules'] = client['context.modules'][:3]
-    (directory / 'client.conf').write_text(json.dumps(client))
+    (directory / 'client.conf').write_text(json.dumps(client, indent=2))
     return {**environment, 'PIPEWIRE_DAEMON': 'false',
             'PIPEWIRE_CONFIG_PREFIX': str(directory), 'PIPEWIRE_CONFIG_DIR': str(directory),
             'PIPEWIRE_CONFIG_NAME': 'client.conf'}
@@ -298,7 +298,9 @@ def serve(env, directory, plugin, guard):
         if properties(obj).get('node.name') in (CAPTURE, OUTPUT):
             raise RuntimeError('A conditioned microphone already exists')
     source_serial = serial(raw)
-    (directory / 'filter.conf').write_text(json.dumps(filter_config(plugin, source_serial)))
+    # PipeWire 1.6.10 parses module args in-place and writes a trailing NUL.
+    # Keep whitespace before the enclosing delimiter so it is not overwritten.
+    (directory / 'filter.conf').write_text(json.dumps(filter_config(plugin, source_serial), indent=2))
     guard.mark()  # Crash or SIGKILL leaves this in place, including across login.
     child = None
     healthy_stop = False

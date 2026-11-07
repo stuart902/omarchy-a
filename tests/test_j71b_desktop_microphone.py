@@ -234,6 +234,7 @@ class SupervisorPolicy(unittest.TestCase):
                 patch.object(mic.subprocess, 'Popen', return_value=child) as popen, \
                 patch.object(mic.time, 'sleep', side_effect=sleep):
             mic.serve({}, Path(temp), Path('/plugin.so'), guard)
+            self.filter_text = (Path(temp) / 'filter.conf').read_text()
         return child, guard, popen
 
     def test_normal_stop_cleans_only_after_idle(self):
@@ -242,6 +243,13 @@ class SupervisorPolicy(unittest.TestCase):
         guard.mark.assert_called_once(); guard.clean.assert_called_once()
         child.send_signal.assert_called_once_with(signal.SIGINT)
         self.assertEqual(popen.call_count, 1)
+
+    def test_written_filter_keeps_pipewire_parser_whitespace(self):
+        def stop(unused): mic.STOP = True
+        self.run_service([base(), graph(), base()], sleep=stop)
+        parsed = json.loads(self.filter_text)
+        self.assertEqual(parsed, mic.filter_config(Path('/plugin.so'), '110'))
+        self.assertEqual(self.filter_text, json.dumps(parsed, indent=2))
 
     def test_graph_fault_retains_marker_without_reopen(self):
         bad = graph(); bad[0]['info']['props']['object.serial'] = 999
