@@ -134,7 +134,9 @@ class MicrophonePackaging(unittest.TestCase):
         # plugin without touching its DSP source or Python build helper.
         for path in ('system/build-rootfs', 'system/assemble-rootfs',
                      'system/install-toolchain', 'system/packages.txt',
-                     'release/public_root.py', 'tools/build.py'):
+                     'release/public_root.py', 'tools/build.py',
+                     'tools/package_j71b_microphone.py', 'tools/j71b_microphone_package.py',
+                     'docs/j71b-microphone-package.md'):
             with self.subTest(path=path):
                 self.assertIn("      - '" + path + "'\n", triggers)
 

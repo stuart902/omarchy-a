@@ -117,8 +117,13 @@ concurrent consumers, default selection, idle and clean teardown, plus retained
 ownership after source/link loss, child exit, server disconnect and a hung
 filter. Only diagnostic logs are retained, never audio samples. Forced cleanup
 of synthetic fixtures happens after assertions and is not production recovery.
-Real systemd user-manager behavior, desktop GUI selection, ARM scheduling
-deadlines and hardware safety remain separate qualification requirements.
+The separate `systemd-lifecycle` CI job uses an already-running, unprivileged
+Ubuntu user manager and synthetic processes to verify inactive prerequisites,
+healthy stop, retained ownership after faults, no automatic restart and no
+forced-kill recovery for hung children or supervisors. It preserves the
+production unit and board guards, testing a separate fixture with the same
+lifecycle directives. It does not qualify the tablet's exact systemd version,
+desktop GUI selection, ARM scheduling deadlines or hardware safety.
 
 The synthetic generator is externally clocked by PipeWire's dummy driver.
 In PipeWire 1.6.10, a live `audiotestsrc` acting as its own driver disarms its
