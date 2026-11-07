@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>J71b local microphone acceptance</title>
+  <style>
+    body { font: 1.05rem/1.5 system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; color: #17212b; background: #f5f7fa; }
+    h1 { line-height: 1.2; }
+    button, a { font: inherit; }
+    button { padding: .6rem 1rem; margin: .2rem .4rem .2rem 0; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    #status { border: 2px solid #415d7a; padding: 1rem; background: white; }
+    a { display: block; margin: .7rem 0; }
+    [hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <h1>J71b local microphone acceptance</h1>
+  <p>Open this saved file in Firefox with <strong>Ctrl+O</strong>. No server, account,
+    extra recorder, upload or playback is used. This page works only from a local
+    <strong>file:</strong> URL. It makes no network requests.</p>
+  <ol>
+    <li>Make sure the already-installed conditioned microphone service is running.</li>
+    <li>Click Record. In Firefox's microphone permission prompt, explicitly choose
+      <strong>J71b Microphone (conditioned)</strong>, then allow access for this take.
+      Do not choose Default or the raw microphone. If the exact source is absent,
+      cancel. This page cannot list labels before permission.</li>
+    <li>Say a short phrase at normal volume. Keep this tab visible; hiding it stops
+      and discards an unfinished take. Recording ends after about 10 seconds.
+      Cancel discards the take. Check the source, settings and ended status below.</li>
+    <li>Download only if you want to keep the take. There is no automatic download.
+      A new take or closing this page discards unsaved files.</li>
+  </ol>
+  <p>If Firefox reused a permission or selected the wrong source, this page refuses
+    to record it. Use Firefox's microphone permission control to clear that grant,
+    then explicitly try again. Do not change browser security settings if local-file
+    capture is unavailable; report that limitation instead.</p>
+  <p>Echo cancellation, automatic gain control and noise suppression are requested
+    off. The reported settings, including “not reported”, are shown below; a request
+    alone does not prove they were disabled. This browser-encoded recording and its
+    decoded PCM16 WAV are <strong>not bit-exact native PCM</strong>. WAV conversion
+    uses only an offline decoder, with no normalization or gain adjustment.</p>
+  <button id="record" type="button">Record one 10-second take</button>
+  <button id="cancel" type="button" disabled>Cancel and discard</button>
+  <p id="status" role="status" aria-live="polite">Idle. Microphone is not open.</p>
+  <pre id="details">No take yet.</pre>
+  <a id="wav" hidden>Download PCM16 WAV</a>
+  <a id="original" hidden>Download original browser recording</a>
+  <script>
+    'use strict';
+    const EXPECTED_SOURCE = 'J71b Microphone (conditioned)';
+    const TAKE_MS = 10000;
+    const recordButton = document.getElementById('record');
+    const cancelButton = document.getElementById('cancel');
+    const status = document.getElementById('status');
+    const details = document.getElementById('details');
+    const links = ['wav', 'original'].map(id => document.getElementById(id));
+    let active = null;
+    let pageHidden = false;
+
+    function stopTracks(stream) {
+      if (stream) for (const track of stream.getTracks()) track.stop();
+    }
+
+    function clearDownloads() {
+      for (const link of links) {
+        if (link.hasAttribute('href')) URL.revokeObjectURL(link.href);
+        link.removeAttribute('href');
+        link.removeAttribute('download');
+        link.hidden = true;
+      }
+    }
+
+    function offerDownload(id, blob, filename) {
+      const link = document.getElementById(id);
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.hidden = false;
+    }
+
+    function releaseCapture(run) {
+      clearTimeout(run.timer);
+      if (run.track && run.onEnded) run.track.removeEventListener('ended', run.onEnded);
+      stopTracks(run.stream);
+    }
+
+    function finish(run, message, discard = false) {
+      if (active !== run) return;
+      active = null; // Invalidate permission/recorder/decoder callbacks first.
+      releaseCapture(run);
+      if (run.recorder) {
+        run.recorder.ondataavailable = run.recorder.onstop = run.recorder.onerror = null;
+        if (run.recorder.state !== 'inactive') {
+          try { run.recorder.stop(); } catch (_) { /* Tracks are already stopped. */ }
+        }
+      }
+      run.chunks = [];
+      if (discard) clearDownloads();
+      recordButton.disabled = pageHidden;
+      cancelButton.disabled = true;
+      status.textContent = message;
+    }
+
+    function fail(run, message) {
+      finish(run, `Ended: ${message} All acquired microphone tracks are stopped.`, true);
+    }
+
+    function reportedSettings(settings) {
+      return ['echoCancellation', 'autoGainControl', 'noiseSuppression',
+        'sampleRate', 'sampleSize', 'channelCount', 'latency']
+        .map(key => `${key}: ${settings[key] === undefined ? 'not reported' : settings[key]}`)
+        .join('\n');
+    }
+
+    // PCM16 interleaving/quantization only. Values outside [-1, 1] saturate;
+    // nonfinite values become zero. No normalization, gain, fades or playback.
+    function encodeWav(buffer) {
+      const channels = buffer.numberOfChannels;
+      const frames = buffer.length;
+      const rate = buffer.sampleRate;
+      const bytes = frames * channels * 2;
+      if (!Number.isInteger(channels) || channels < 1 || channels > 32767 ||
+          !Number.isInteger(frames) || frames < 1 || !Number.isInteger(rate) || rate < 1 ||
+          rate * channels * 2 > 0xffffffff || bytes > 0xffffffff - 36) {
+        throw new Error('Unsupported WAV dimensions');
+      }
+      const result = new ArrayBuffer(44 + bytes);
+      const view = new DataView(result);
+      const text = (offset, value) => {
+        for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
+      };
+      text(0, 'RIFF'); view.setUint32(4, 36 + bytes, true); text(8, 'WAVE');
+      text(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+      view.setUint16(22, channels, true); view.setUint32(24, rate, true);
+      view.setUint32(28, rate * channels * 2, true); view.setUint16(32, channels * 2, true);
+      view.setUint16(34, 16, true); text(36, 'data'); view.setUint32(40, bytes, true);
+      const samples = Array.from({ length: channels }, (_, i) => buffer.getChannelData(i));
+      let offset = 44;
+      for (let frame = 0; frame < frames; frame++) {
+        for (const channel of samples) {
+          const value = Number.isFinite(channel[frame]) ? Math.max(-1, Math.min(1, channel[frame])) : 0;
+          view.setInt16(offset, Math.round(value * (value < 0 ? 32768 : 32767)), true);
+          offset += 2;
+        }
+      }
+      return result;
+    }
+
+    async function prepareDownloads(run) {
+      if (active !== run) return;
+      if (!run.stopping) return fail(run, 'Recorder stopped unexpectedly; take discarded.');
+      releaseCapture(run);
+      try {
+        const mime = run.recorder.mimeType || (run.chunks[0] && run.chunks[0].type) || '';
+        const original = new Blob(run.chunks, { type: mime });
+        run.chunks = [];
+        if (!original.size) throw new Error('Recorder returned no audio data');
+        const extension = mime.includes('ogg') ? 'ogg' : mime.includes('webm') ? 'webm' :
+          mime.includes('mp4') ? 'mp4' : 'bin';
+        const stem = `j71b-conditioned-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+        offerDownload('original', original, `${stem}.${extension}`);
+        details.textContent += `\nCapture wall time: ${((run.end - run.start) / 1000).toFixed(2)} s` +
+          `\nOriginal: ${original.size} bytes; ${mime || 'format not reported'}`;
+        status.textContent = 'Capture ended. All microphone tracks are stopped. Preparing local WAV…';
+        try {
+          if (typeof OfflineAudioContext !== 'function') throw new Error('OfflineAudioContext unavailable');
+          const rate = run.settings.sampleRate || 48000;
+          const decoder = new OfflineAudioContext(1, 1, rate);
+          const bytes = await original.arrayBuffer();
+          if (active !== run) return;
+          const decoded = await decoder.decodeAudioData(bytes);
+          if (active !== run) return;
+          const wav = new Blob([encodeWav(decoded)], { type: 'audio/wav' });
+          offerDownload('wav', wav, `${stem}.wav`);
+          details.textContent += `\nWAV: ${wav.size} bytes; ${decoded.numberOfChannels} channel(s); ` +
+            `${decoded.sampleRate} Hz; ${(decoded.length / decoded.sampleRate).toFixed(2)} s decoded`;
+          finish(run, 'Ended: all microphone tracks are stopped. Local downloads are ready.');
+        } catch (error) {
+          finish(run, `Ended: all microphone tracks are stopped. WAV unavailable (${error.message}). ` +
+            'The original browser recording is available; no recapture was attempted.');
+        }
+      } catch (error) {
+        fail(run, `Could not retain the take (${error.message}).`);
+      }
+    }
+
+    function stopTake(run) {
+      if (active !== run || run.stopping) return;
+      run.stopping = true;
+      run.end = performance.now();
+      try {
+        run.recorder.stop();
+        releaseCapture(run); // Stop hardware capture without waiting for final data/decoding.
+        if (active === run) status.textContent = 'Capture ended. All microphone tracks are stopped. Finishing the local recording…';
+      } catch (error) {
+        fail(run, `Could not finish recording (${error.message}).`);
+      }
+    }
+
+    async function startTake() {
+      if (active || pageHidden || document.visibilityState === 'hidden') return;
+      clearDownloads();
+      details.textContent = 'No source acquired yet.';
+      const run = { chunks: [], stopping: false };
+      active = run;
+      recordButton.disabled = true;
+      cancelButton.disabled = false;
+      try {
+        if (location.protocol !== 'file:') throw new Error('Open the saved HTML file locally in Firefox');
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('Local-file microphone access is unavailable in this browser');
+        }
+        if (typeof MediaRecorder !== 'function') throw new Error('MediaRecorder is unavailable');
+        status.textContent = `Waiting for permission. Choose exactly “${EXPECTED_SOURCE}” in Firefox.`;
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, autoGainControl: false, noiseSuppression: false },
+          video: false
+        });
+        if (active !== run || pageHidden) {
+          stopTracks(stream); // A cancelled permission prompt can still resolve much later.
+          return;
+        }
+        run.stream = stream;
+        const tracks = stream.getAudioTracks();
+        details.textContent = `Source label: ${tracks.map(track => track.label).join(', ') || '(none)'}`;
+        if (tracks.length !== 1 || stream.getTracks().length !== 1 || tracks[0].label !== EXPECTED_SOURCE) {
+          return fail(run, `Source refused. Expected exactly “${EXPECTED_SOURCE}”. No recording was made.`);
+        }
+        run.track = tracks[0];
+        if (run.track.readyState !== 'live') return fail(run, 'The selected microphone is not live.');
+        run.settings = run.track.getSettings ? run.track.getSettings() : {};
+        details.textContent += `\nReported track settings (processing requested off):\n${reportedSettings(run.settings)}`;
+        run.onEnded = () => fail(run, 'The microphone ended unexpectedly; take discarded.');
+        run.track.addEventListener('ended', run.onEnded);
+        const mime = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus']
+          .find(type => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(type));
+        run.recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+        run.recorder.ondataavailable = event => {
+          if (active === run && event.data.size) run.chunks.push(event.data);
+        };
+        run.recorder.onerror = event => fail(run, `Recorder error (${event.error ? event.error.name : 'unknown'}); take discarded.`);
+        run.recorder.onstop = () => { void prepareDownloads(run); };
+        run.recorder.start();
+        run.start = performance.now();
+        run.timer = setTimeout(() => stopTake(run), TAKE_MS);
+        status.textContent = 'Recording. Speak normally. The take will end automatically after about 10 seconds.';
+      } catch (error) {
+        fail(run, `Could not record (${error.name}: ${error.message}).`);
+      }
+    }
+
+    recordButton.addEventListener('click', () => { void startTake(); });
+    cancelButton.addEventListener('click', () => {
+      if (active) finish(active, 'Ended: cancelled and discarded. All acquired microphone tracks are stopped. ' +
+        'Dismiss any permission prompt still open; a late permission result will be stopped immediately.', true);
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden' && active) {
+        finish(active, 'Ended: tab hidden; take discarded and acquired microphone tracks stopped. ' +
+          'Any late permission result will be stopped immediately.', true);
+      }
+    });
+    window.addEventListener('pagehide', () => {
+      pageHidden = true;
+      if (active) finish(active, 'Ended: page closed; take discarded and microphone tracks stopped.', true);
+      clearDownloads();
+    });
+    window.addEventListener('pageshow', () => {
+      pageHidden = false;
+      recordButton.disabled = !!active;
+    });
+  </script>
+</body>
+</html>

@@ -35,7 +35,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates git build-essential ladspa-sdk python3-numpy \
+            ca-certificates git build-essential ladspa-sdk python3-numpy nodejs \
             libpipewire-0.3-0t64 libspa-0.2-modules
           dpkg-query -W libpipewire-0.3-0t64 libspa-0.2-modules ladspa-sdk
       - uses: actions/checkout@v4
@@ -52,6 +52,7 @@ jobs:
           # Real sessions run separately in the bounded synthetic-session job.
           python3 -m py_compile test_desktop_session.py
           python3 test_desktop_session_unit.py
+          node test_browser_test.cjs
           python3 test_systemd_lifecycle.py --self-test
       - name: Test desktop lifecycle and packaging policy without a daemon
         run: python3 -m unittest discover -s tests -p 'test_j71b*.py' -v

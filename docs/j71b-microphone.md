@@ -118,6 +118,74 @@ This only clears the marker when the recorded boot differs. It cannot verify
 the physical action and does not start capture. Never delete a marker merely
 to bypass a failed test.
 
+## Local Firefox acceptance, without uploads
+
+Firefox is included in the image. For an already-installed, approved candidate,
+save `experiments/j71b-capture/browser_test.html` locally on the tablet. This is
+only a test page; it does not replace any installed microphone files or change
+the fixed gain. Open the saved file from Firefox's **Ctrl+O** dialog, not a hosted
+website. No account, local server or new recorder is needed.
+
+In an SSH shell owned by the same desktop user, connect to the existing user
+session and start the service once:
+
+```sh
+(
+  set -eu
+  [ "$(id -u)" -ne 0 ] || { echo 'Use the desktop user, not root.' >&2; exit 1; }
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+  timeout 20s systemctl --user start omarchy-j71b-microphone.service
+  sleep 10
+  timeout 5s systemctl --user show omarchy-j71b-microphone.service \
+    --property=ActiveState,SubState,Result,MainPID
+)
+```
+
+Continue only with `active`, `running`, `success` and a nonzero main PID. A failed
+or timed-out command is a stop condition, not a reason to repeat the start.
+In Firefox, click **Record one 10-second take**, explicitly choose **J71b
+Microphone (conditioned)** in the permission prompt, and allow that take. If
+the source is absent, cancel. The page refuses a different or missing track
+label before creating a recorder. It cannot prevent the browser from briefly
+opening a wrongly selected microphone while granting permission.
+
+Keep the tab visible and speak normally. Hiding or closing the page cancels the
+take instead of relying on a background tab's timer. The page stops all acquired
+tracks after about ten seconds and
+shows the actual source label, reported processing settings and capture duration.
+It requests echo cancellation, automatic gain control and noise suppression off;
+the displayed results matter because browsers can ignore or omit settings. The
+page does not change the system default, upload audio or play sound. It offers a
+local original browser recording and, when offline decoding works, a PCM16 WAV
+without normalization. Neither is bit-exact native PCM. If WAV decoding is
+unavailable, keep the original; no recapture is needed for that conversion error.
+
+After downloading the desired file, close the page and stop the service once:
+
+```sh
+(
+  set -eu
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+  timeout 30s systemctl --user stop omarchy-j71b-microphone.service
+  timeout 5s systemctl --user show omarchy-j71b-microphone.service \
+    --property=ActiveState,SubState,Result,MainPID,ControlPID
+)
+```
+
+Expected: `inactive`, `dead`, `success` and both PIDs zero. For a failure, keep
+the output and the last 30 service journal lines; do not force-kill, restart or
+delete a fault marker. Keep playback on a separate computer while speaker
+qualification remains open. A successful take establishes this browser path,
+not all applications, physical clock/DMA release or suspend/resume safety.
+
+The page's pure mocked tests cover source refusal, cancellation, late permission
+resolution, recorder/decoder failure, page dismissal, track cleanup and WAV
+encoding. They do not establish Firefox's actual local-file permission behavior.
+If Firefox refuses local-file capture, report that result; do not disable browser
+security settings or silently switch to an external recording site.
+
 ## Build and verification
 
 `system/microphone.py` compiles `experiments/j71b-capture/capture.c` on the native
