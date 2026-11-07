@@ -93,6 +93,9 @@ python3 package.py verify
 `verify` rejects unlisted/missing files, symlinks, hard links, changed hashes,
 stale qualification records, source/receipt disagreements and wrong ABI.
 A successful verification is not permission to install or start capture.
+Keep generated logs and preflight reports outside this extracted directory:
+verification rejects extra files, including a report created by shell
+redirection before the command starts. The examples below save reports in HOME.
 
 ## Separately authorized read-only device preflight
 
@@ -129,7 +132,7 @@ unresponsive. Use the just-reviewed digest and independently verified image ID:
 ```sh
 sudo python3 package.py preflight --operation install --user DESKTOP_USER \
   --image-id preview-audio-nov4-41918815273 \
-  --reviewed-kernel-sha256 REVIEWED_LOG_SHA256 > install-preflight.json
+  --reviewed-kernel-sha256 REVIEWED_LOG_SHA256 > "$HOME/j71b-install-preflight.json"
 ```
 
 The check requires exact J71b/T8010/AArch64 and runtime versions; readable
@@ -156,7 +159,7 @@ do not edit or reuse a stale report. Close recorders and do not manipulate the
 session concurrently with installation/removal.
 
 ```sh
-sudo python3 package.py install --user DESKTOP_USER --preflight install-preflight.json
+sudo python3 package.py install --user DESKTOP_USER --preflight "$HOME/j71b-install-preflight.json"
 ```
 
 All target checks complete before any mutation. Files are created exclusively,
@@ -204,8 +207,8 @@ digest and a removal preflight, then separately authorize file removal:
 ```sh
 sudo python3 package.py preflight --operation remove --user DESKTOP_USER \
   --image-id preview-audio-nov4-41918815273 \
-  --reviewed-kernel-sha256 REVIEWED_LOG_SHA256 > remove-preflight.json
-sudo python3 package.py remove --user DESKTOP_USER --preflight remove-preflight.json
+  --reviewed-kernel-sha256 REVIEWED_LOG_SHA256 > "$HOME/j71b-remove-preflight.json"
+sudo python3 package.py remove --user DESKTOP_USER --preflight "$HOME/j71b-remove-preflight.json"
 ```
 
 Removal first validates **all four** installed hashes, ownerships, modes and

@@ -92,6 +92,14 @@ def write_package(directory, files):
 
 
 class OfflinePackage(unittest.TestCase):
+    def test_documented_reports_stay_outside_verified_package(self):
+        guide = (PROJECT / 'docs/j71b-microphone-package.md').read_text()
+        for operation in ('install', 'remove'):
+            report = '"$HOME/j71b-' + operation + '-preflight.json"'
+            self.assertIn('> ' + report, guide)
+            self.assertIn('--preflight ' + report, guide)
+        self.assertIn('Keep generated logs and preflight reports outside', guide)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
