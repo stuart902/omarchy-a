@@ -26,7 +26,9 @@ RUNTIME = ROOT / 'system/overlay/usr/lib/omarchy-j71b-microphone/desktop_mic.py'
 FALLBACK = 'j71b.test.other-source'
 REMOTE = 'pipewire-0'
 DRIVER = 'Dummy-Driver'
-TONE_FREQUENCY = 1000
+# Pinned audiotestsrc default. pw-cli serializes SPA_PROP_frequency as Int,
+# while this source accepts Float, so a named JSON frequency update is ignored.
+TONE_FREQUENCY = 440
 # audiotestsrc's volume is also applied by its adapter: .1 * .1. A different
 # right-channel amplitude makes swapped/dropped channels observable in PCM.
 TONE_AMPLITUDES = np.array([.01, .005])
@@ -607,6 +609,21 @@ def pulse_absent(session, name):
     return {'case': name, 'exit': child.returncode, 'pcm_bytes': 0, 'no_fallback': True}
 
 
+def configure_pulse_tone(session):
+    # Only fixture input changes, never the service gain or DSP. Retain the
+    # pinned generator's default frequency and verify it rather than assuming
+    # that a successful pw-cli exit means every optional property took effect.
+    session.run('pw-cli', 'set-param', str(session.source_id), 'Props',
+                '{ volume: 0.1, channelVolumes: [ 1.0, 0.5 ] }')
+    raw = nodes(session.dump(), session.runtime.SOURCE)[0]
+    parameters = raw['info']['params']['Props']
+    generators = [param for param in parameters if 'frequency' in param]
+    assert len(generators) == 1, 'Cannot verify synthetic generator frequency'
+    assert generators[0]['frequency'] == TONE_FREQUENCY, 'Unexpected synthetic generator frequency'
+    assert generators[0]['waveType'] == 0, 'Synthetic generator is not a sine wave'
+    session.write('pulse-fixture-props.json', parameters)
+
+
 def pulse_healthy(session):
     session.boot_pulse()
     assert_pulse_default(session, FALLBACK)
@@ -619,10 +636,7 @@ def pulse_healthy(session):
     assert output['channel_map'] == 'front-left,front-right'
     session.write('pulse-sources.json', sources)
     assert_pulse_default(session, FALLBACK)
-    # Only fixture input changes, never the service gain or DSP. This yields
-    # known 1 kHz PCM with unequal channel levels at the production capture.
-    session.run('pw-cli', 'set-param', str(session.source_id), 'Props',
-                '{ frequency: 1000, volume: 0.1, channelVolumes: [ 1.0, 0.5 ] }')
+    configure_pulse_tone(session)
     results.append(pulse_record(session, 'pulse-raw', session.runtime.SOURCE, 48000, 2))
     for rate, channels in ((48000, 2), (48000, 1), (44100, 2), (16000, 1)):
         results.append(pulse_record(session, f'pulse-{rate}-{channels}',

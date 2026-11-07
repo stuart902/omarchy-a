@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <spa/utils/json-pod.h>
 #include "audiotestsrc.c"
 
 struct test_host {
@@ -80,6 +81,58 @@ static int ready(void *data, int status)
     assert(status == SPA_STATUS_HAVE_DATA);
     host->ready++;
     return 0;
+}
+
+static void exercise_json_frequency(void)
+{
+    /* Exactly the JSON-to-POD path used by pw-cli set-param. The adapter
+     * forwards this POD, but the pinned type table says Int while the source
+     * parses only Float. Even a decimal JSON literal does not fix the type.
+     * No initialized SPA host, clock, socket, or timer is needed here. */
+    const char *cases[] = {"{ frequency: 1000, volume: 0.1 }",
+                          "{ frequency: 1000.0, volume: 0.1 }"};
+    const struct spa_type_info *type = spa_debug_type_find_short(spa_type_param, "Props");
+    assert(type != NULL);
+    for (unsigned i = 0; i < SPA_N_ELEMENTS(cases); i++) {
+        struct impl source = {0};
+        uint8_t bytes[1024];
+        struct spa_pod_builder builder = SPA_POD_BUILDER_INIT(bytes, sizeof(bytes));
+        reset_props(&source.props);
+        assert(source.props.freq == 440.0f);
+        assert(spa_json_to_pod(&builder, 0, type, cases[i], strlen(cases[i])) == 0);
+        const struct spa_pod *pod = spa_pod_builder_deref(&builder, 0);
+        const struct spa_pod_prop *frequency = spa_pod_find_prop(pod, NULL, SPA_PROP_frequency);
+        assert(frequency != NULL && frequency->value.type == SPA_TYPE_Int);
+        assert(impl_node_set_param(&source, SPA_PARAM_Props, 0, pod) == 0);
+        assert(source.props.freq == 440.0f && source.props.volume == 0.1f);
+
+        /* Real unchanged generator samples confirm the ignored override is
+         * still a 440 Hz sine, not merely a stale property enumeration. */
+        float samples[12000 * 2];
+        double sine = 0.0, cosine = 0.0, wrong_sine = 0.0, wrong_cosine = 0.0;
+        source.port.current_format.info.raw.rate = 48000;
+        source.port.current_format.info.raw.channels = 2;
+        audio_test_src_create_sine_float(&source, samples, 12000);
+        for (unsigned n = 0; n < 12000; n++) {
+            double phase = 2.0 * M_PI * n / 48000;
+            assert(samples[n * 2] == samples[n * 2 + 1]);
+            sine += samples[n * 2] * sin(phase * 440);
+            cosine += samples[n * 2] * cos(phase * 440);
+            wrong_sine += samples[n * 2] * sin(phase * 1000);
+            wrong_cosine += samples[n * 2] * cos(phase * 1000);
+        }
+        assert(fabs(2.0 * hypot(sine, cosine) / 12000 - 0.1) < 0.00001);
+        assert(2.0 * hypot(wrong_sine, wrong_cosine) / 12000 < 0.00001);
+
+        /* A correctly typed direct SPA update does change the generator.
+         * Keep the CI fixture simple instead: use and verify pinned 440 Hz. */
+        spa_pod_builder_init(&builder, bytes, sizeof(bytes));
+        pod = spa_pod_builder_add_object(&builder, SPA_TYPE_OBJECT_Props, SPA_PARAM_Props,
+                                         SPA_PROP_frequency, SPA_POD_Float(1000.0f));
+        assert(impl_node_set_param(&source, SPA_PARAM_Props, 0, pod) == 0);
+        assert(source.props.freq == 1000.0f);
+    }
+    puts("PASS: pw-cli JSON frequency is Int and ignored by Float-only audiotestsrc; pinned 440 Hz PCM verified");
 }
 
 static void exercise(bool follower)
@@ -199,6 +252,7 @@ static void exercise(bool follower)
 
 int main(void)
 {
+    exercise_json_frequency();
     exercise(false);
     exercise(true);
     return 0;

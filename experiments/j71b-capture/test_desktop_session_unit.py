@@ -13,11 +13,11 @@ import test_desktop_session as fixture
 
 
 def tone(rate=48000, channels=2, conditioned=True):
-    # Independently specified 1 kHz fixture with unequal stereo amplitudes.
+    # Independently specified 440 Hz fixture with unequal stereo amplitudes.
     amplitudes = np.array([.01, .005]) if channels == 2 else np.array([.0075])
     if conditioned:
         amplitudes *= 10 ** .6
-    phase = 2 * np.pi * 1000 * np.arange(rate * 3 // 4) / rate + .4
+    phase = 2 * np.pi * 440 * np.arange(rate * 3 // 4) / rate + .4
     return np.sin(phase)[:, None] * amplitudes
 
 
@@ -91,14 +91,14 @@ class PulseFixtureTests(unittest.TestCase):
 
     def test_expected_response_includes_high_pass(self):
         gain = fixture.tone_expectation(2, True) / np.array([.01, .005])
-        np.testing.assert_allclose(gain, 3.980990647, rtol=1e-7)
+        np.testing.assert_allclose(gain, 3.978900508, rtol=1e-7)
         self.assertLess(gain[0], 10 ** .6)
         np.testing.assert_allclose(fixture.tone_expectation(1, True),
                                    [fixture.tone_expectation(2, True).mean()])
 
     def test_pcm_rejects_silence_wrong_gain_channels_and_frequency(self):
         good = tone()
-        wrong_frequency = np.sin(2 * np.pi * 440 * np.arange(len(good)) / 48000)[:, None]
+        wrong_frequency = np.sin(2 * np.pi * 1000 * np.arange(len(good)) / 48000)[:, None]
         wrong_frequency = wrong_frequency * np.array([.01, .005]) * 10 ** .6
         bad = {
             'silent': good * 0, 'raw-fallback': good / 10 ** .6,
@@ -157,6 +157,23 @@ class PulseFixtureTests(unittest.TestCase):
             with self.subTest(source=source_id), self.assertRaisesRegex(AssertionError, 'fell back'):
                 fixture.assert_no_consumer_fallback(graph, 'app', 'conditioned')
         fixture.assert_no_consumer_fallback(graph[:-2], 'app')
+
+    def test_fixture_retains_and_verifies_pinned_generator_frequency(self):
+        source = node(10, 'raw')
+        source['info']['params'] = {'Props': [
+            {'channelVolumes': [1.0, .5]}, {'frequency': 440.0, 'waveType': 0, 'volume': .1}]}
+        session = Mock(source_id=10)
+        session.runtime.SOURCE = 'raw'
+        session.dump.return_value = [source]
+        fixture.configure_pulse_tone(session)
+        session.run.assert_called_once_with('pw-cli', 'set-param', '10', 'Props',
+                                             '{ volume: 0.1, channelVolumes: [ 1.0, 0.5 ] }')
+        for parameters in ([], [{'frequency': 1000, 'waveType': 0}],
+                           [{'frequency': 440, 'waveType': 1}],
+                           [{'frequency': 440, 'waveType': 0}] * 2):
+            source['info']['params']['Props'] = parameters
+            with self.subTest(parameters=parameters), self.assertRaises(AssertionError):
+                fixture.configure_pulse_tone(session)
 
 
 if __name__ == '__main__':
