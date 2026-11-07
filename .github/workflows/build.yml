@@ -51,6 +51,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - name: Install the pacman configuration parser for package-source tests
+        run: sudo apt-get update && sudo apt-get install -y pacman-package-manager
       - name: Validate release tag
         if: github.ref_type == 'tag'
         env:

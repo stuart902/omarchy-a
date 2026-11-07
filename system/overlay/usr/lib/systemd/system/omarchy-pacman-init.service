@@ -1,14 +1,15 @@
 [Unit]
 Description=Initialize the pacman keyring
 # build-rootfs ships no keyring so each device generates its own local key.
-ConditionPathExists=!/etc/pacman.d/gnupg/trustdb.gpg
 After=local-fs.target
+Before=greetd.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/pacman-key --init
-ExecStart=/usr/bin/pacman-key --populate archlinuxarm
+# Repeat population on every boot, including after interrupted initialization.
+ExecStart=/usr/bin/pacman-key --populate archlinuxarm omarchy
 
 [Install]
 WantedBy=multi-user.target
