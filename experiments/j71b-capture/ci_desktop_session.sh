@@ -89,7 +89,7 @@ multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
 meson setup "$build_dir/pipewire-build" "$build_dir/pipewire" \
   --prefix=/usr --libdir="lib/$multiarch" --sysconfdir=/etc \
   --buildtype=release --auto-features=disabled --wrap-mode=nodownload \
-  -Ddbus=disabled -Dflatpak=disabled -Dpipewire-alsa=disabled \
+  -Ddbus=enabled -Dflatpak=disabled -Dpipewire-alsa=disabled \
   -Dpipewire-jack=disabled -Dpipewire-v4l2=disabled \
   -Dalsa=disabled -Dbluez5=disabled -Djack=disabled -Dv4l2=disabled \
   -Dlibcamera=disabled -Dudev=disabled -Dlibsystemd=disabled -Dlogind=disabled \

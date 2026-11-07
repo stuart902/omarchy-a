@@ -137,9 +137,9 @@ jobs:
           apt-get install -y --no-install-recommends \
             ca-certificates git build-essential ladspa-sdk meson ninja-build \
             pkg-config python3-numpy libsndfile1-dev libglib2.0-dev liblua5.4-dev \
-            gettext dbus-daemon dbus-bin util-linux passwd coreutils procps
+            libdbus-1-dev gettext dbus-daemon dbus-bin util-linux passwd coreutils procps
           dpkg-query -W meson python3-numpy libsndfile1-dev libglib2.0-dev \
-            liblua5.4-dev dbus-daemon dbus-bin
+            liblua5.4-dev libdbus-1-dev dbus-daemon dbus-bin
       - uses: actions/checkout@v4
         id: checkout
         with:
