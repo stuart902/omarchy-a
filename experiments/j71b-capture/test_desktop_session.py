@@ -292,12 +292,19 @@ def finish_recording(session, child, path, rate, channels, bounded=True):
     # pw-cat 1.6.10's SIGINT path, like its recording sample limit, does not
     # signal drained. Only accept 1 after our requested signal, observed live
     # routing and independently validated synthetic PCM with no diagnostics.
+    # Hosted-runner scheduling is not a real-time guarantee. Wait for observed
+    # PCM instead of treating a short wall-clock sleep as captured duration.
+    deadline = time.monotonic() + 5
+    while path.stat().st_size < rate * channels * 4 // 2:
+        assert child.poll() is None, f'{path.name}: recorder exited before enough PCM'
+        assert time.monotonic() < deadline, f'{path.name}: timed out waiting for PCM'
+        time.sleep(.05)
     code = session.stop(child)
     assert code in (0, 1), f'Recorder failed: {code}'
     log = path.with_suffix('.log').read_text().strip()
     assert not log, 'Recorder diagnostics: ' + log
     samples = np.fromfile(path, dtype='<f4')
-    assert samples.size >= rate * channels // 4, 'Too little synthetic audio'
+    assert samples.size >= rate * channels // 4, f'{path.name}: too little synthetic audio'
     assert samples.size % channels == 0
     samples = samples.reshape(-1, channels)
     assert np.isfinite(samples).all()
@@ -422,11 +429,13 @@ def fault(session, mode):
     if mode == 'source-loss':
         session.run('pw-cli', 'destroy', str(session.source_id))
     elif mode == 'link-loss':
-        session.manager.send_signal(signal.SIGSTOP)
         data = session.dump()
         capture_id = nodes(data, session.runtime.CAPTURE)[0]['id']
         link = next(o for o in data if o['type'].endswith(':Link')
                     and o['info']['input-node-id'] == capture_id)
+        # Read metadata before freezing its owner. The production supervisor's
+        # graph-only client does not bind metadata and remains responsive.
+        session.manager.send_signal(signal.SIGSTOP)
         session.run('pw-cli', 'destroy', str(link['id']))
     elif mode == 'child-exit':
         os.kill(pid, signal.SIGTERM)
