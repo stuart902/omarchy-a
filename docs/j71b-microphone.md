@@ -106,7 +106,16 @@ than silently reusing an older base without the microphone plugin.
 Software coverage includes DSP/real SPA graph tests, config-parser isolation,
 source identification, route validation, fault-marker durability, the
 unexpected-exit/shutdown race, non-restarting cleanup and package verification.
-The real-session harness `experiments/j71b-capture/test_desktop_session.py` is
-written but **not run or qualified** and is not launched by CI. Headless graph
-and mocked supervisor tests do not establish ordinary application behavior,
-real session-manager routing, ARM scheduling deadlines or hardware safety.
+The CI-only harness `experiments/j71b-capture/test_desktop_session.py` exercises
+private synthetic PipeWire/WirePlumber sessions and the actual supervisor's
+`serve()` and ownership routines on x86_64 and AArch64. It does not call the
+hardware-gated production entry point or change its board checks. Check the
+current commit's `synthetic-session` jobs before claiming this coverage passed.
+
+The bounded disposable-container test covers recorder formats, repeated and
+concurrent consumers, default selection, idle and clean teardown, plus retained
+ownership after source/link loss, child exit, server disconnect and a hung
+filter. Only diagnostic logs are retained, never audio samples. Forced cleanup
+of synthetic fixtures happens after assertions and is not production recovery.
+Real systemd user-manager behavior, desktop GUI selection, ARM scheduling
+deadlines and hardware safety remain separate qualification requirements.

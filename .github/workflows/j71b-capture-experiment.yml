@@ -46,7 +46,7 @@ jobs:
           make sanitize
           python3 spa_graph.py
           python3 fixture_config.py build/j71b-capture.so > build/fixture.conf
-          # Real-session harness is not yet qualified; syntax-check only.
+          # Real sessions run separately in the bounded synthetic-session job.
           python3 -m py_compile test_desktop_session.py
       - name: Test desktop lifecycle and packaging policy without a daemon
         run: python3 -m unittest discover -s tests -p 'test_j71b*.py' -v
@@ -77,7 +77,7 @@ jobs:
             printf 'Source commit: %s\n' "$SOURCE_COMMIT"
             printf 'Architecture: %s\n' "$(uname -m)"
             printf 'Build environment: Debian trixie; native ARM64\n'
-            printf 'No tablet or daemon lifecycle test has run in CI.\n'
+            printf 'No tablet or systemd user-manager qualification is included.\n'
             cc --version | head -1
             ldd --version | head -1
           } > build/j71b-microphone-test/BUILD-INFO.txt
@@ -116,3 +116,54 @@ jobs:
             https://github.com/PipeWire/pipewire.git "$RUNNER_TEMP/pipewire-1.6.10"
           bash experiments/j71b-capture/test_pipewire_1_6.sh \
             "$RUNNER_TEMP/pipewire-1.6.10" "$RUNNER_TEMP/pipewire-build"
+  synthetic-session:
+    # Nondeploying synthetic audio only. No host devices/sockets, privileges,
+    # secrets, desktop session, or systemd user manager are supplied.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+    timeout-minutes: 25
+    steps:
+      - name: Install source-build and private-session dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/j71b-desktop-session-logs"
+          exec > >(tee "$RUNNER_TEMP/j71b-desktop-session-logs/dependencies.log") 2>&1
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential ladspa-sdk meson ninja-build \
+            pkg-config python3-numpy libsndfile1-dev libglib2.0-dev liblua5.4-dev \
+            gettext dbus-daemon dbus-bin util-linux passwd coreutils procps
+          dpkg-query -W meson python3-numpy libsndfile1-dev libglib2.0-dev \
+            liblua5.4-dev dbus-daemon dbus-bin
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build pinned engines and exercise the production supervisor
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          printf 'Repository commit: %s\n' "$SOURCE_COMMIT" \
+            > "$RUNNER_TEMP/j71b-desktop-session-logs/checkout.txt"
+          bash experiments/j71b-capture/ci_desktop_session.sh \
+            "$RUNNER_TEMP/j71b-desktop-session" \
+            "$RUNNER_TEMP/j71b-desktop-session-logs"
+      - name: Preserve diagnostic logs, never audio samples
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: j71b-synthetic-session-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/j71b-desktop-session-logs/**/*.log
+            ${{ runner.temp }}/j71b-desktop-session-logs/**/*.txt
+            ${{ runner.temp }}/j71b-desktop-session-logs/**/*.json
+          if-no-files-found: warn
+          retention-days: 7
