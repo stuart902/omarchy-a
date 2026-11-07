@@ -1,5 +1,6 @@
 """Check config isolation with pw-config only; never load modules or connect."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -38,7 +39,17 @@ def main(tool):
         modules = parse('context.modules')
         assert 'filter-chain' in modules and '"110"' in modules
         assert 'WRONG-SOURCE' not in parse('stream.rules')
-        print('Actual config parser: private client/filter configs load; user stream rules excluded')
+        runtime = Path(__file__).resolve().parents[2] / 'system/overlay/usr/lib/omarchy-j71b-microphone/desktop_mic.py'
+        spec = importlib.util.spec_from_file_location('desktop_mic', runtime)
+        desktop = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(desktop)
+        (private/'desktop.conf').write_text(json.dumps(desktop.filter_config(Path('/fixture.so'), '110')))
+        env['PIPEWIRE_CONFIG_NAME'] = 'desktop.conf'
+        modules = parse('context.modules')
+        assert 'filter-chain' in modules and '"110"' in modules
+        assert 'J71b Microphone (conditioned)' in modules
+        assert 'WRONG-SOURCE' not in parse('stream.rules')
+        print('Actual config parser: private acceptance/desktop configs load; user stream rules excluded')
 
 
 if __name__ == '__main__':

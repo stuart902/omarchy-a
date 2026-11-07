@@ -54,7 +54,7 @@ else
   volume=$volume_name
   "$podman" run --rm \
     -v "$volume:/work:rw" \
-    -v "$here:/repo/system:ro" -v "$desktop:/inputs/desktop:ro" \
+    -v "$project:/repo:ro" -v "$desktop:/inputs/desktop:ro" \
     localhost/omarchy-a-arch-builder:latest \
     /repo/system/assemble-rootfs \
       --root /work/root --output /work/rootfs.tar.gz \

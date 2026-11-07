@@ -185,7 +185,7 @@ def config(plugin, source_serial, gain):
                 'media.class': 'Audio/Source', 'node.virtual': True,
                 'node.autoconnect': False, 'node.dont-reconnect': True,
                 'node.always-process': False, 'node.pause-on-idle': True,
-                'priority.session': -10000, 'priority.driver': -10000,
+                'priority.session': -10000, 'priority.driver': 0,
             },
         }}],
     }

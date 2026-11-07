@@ -1,13 +1,15 @@
 # J71b capture-conditioning experiment
 
-**Not a tablet fix or an installed profile.** This directory is outside the
-system overlay and distribution build. It changes no driver, image, audio
-route, speaker setting, service or default volume. No recording or private
-calibration is included. Do not copy the experiment into a live PipeWire
-configuration as a persistent profile. An explicitly requested, one-session
-hardware acceptance procedure is provided in [HARDWARE-TEST.md](HARDWARE-TEST.md).
-It is not enabled or installed automatically, and it does not remove the
-remaining lifecycle and hardware acceptance requirements below.
+**The desktop integration is opt-in and not yet hardware-qualified.** The
+reviewed `capture.c` is now built into the normal userspace root, alongside a
+J71b-only service exposing a selectable conditioned microphone. Nothing is
+enabled automatically. See [desktop integration](../../docs/j71b-microphone.md)
+for the exact scope, fault handling and remaining acceptance checks.
+
+This directory retains the offline DSP tests and the separate one-recording
+[hardware acceptance procedure](HARDWARE-TEST.md). The acceptance launcher is
+not the desktop service. No recording or private calibration is included.
+Do not copy its temporary configuration into a persistent PipeWire profile.
 
 This advances the microphone deliverable by testing the **real PipeWire SPA
 filter-graph engine** with a candidate that handles startup and reset, rather
@@ -117,9 +119,10 @@ SPA tests; daemon/stream/routing tests remain a separate prerequisite.
 6. Select a gain policy from representative recordings, including louder voice,
    rather than interpreting one quiet sample as calibration.
 
-There is no automatic installation target or image rebuild. Resume the single
-project tracker with these remaining gaps; a prototype PR is not completion of
-the usable microphone outcome.
+The normal rootfs builder now compiles the DSP, but does not enable the desktop
+service. The opt-in service and packaging policy have separate tests. Real
+PipeWire/WirePlumber session tests and consolidated device qualification remain
+required before claiming the usable microphone outcome.
 
 ## Primary interface references
 

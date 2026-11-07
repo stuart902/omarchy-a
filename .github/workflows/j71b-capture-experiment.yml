@@ -3,6 +3,11 @@ on:
   pull_request:
     paths:
       - 'experiments/j71b-capture/**'
+      - 'system/overlay/usr/lib/omarchy-j71b-microphone/**'
+      - 'system/overlay/usr/lib/systemd/user/omarchy-j71b-microphone.service'
+      - 'system/microphone.py'
+      - 'tests/test_j71b*'
+      - 'docs/j71b-microphone.md'
       - '.github/workflows/j71b-capture-experiment.yml'
   workflow_dispatch:
 permissions:
@@ -35,6 +40,21 @@ jobs:
           make sanitize
           python3 spa_graph.py
           python3 fixture_config.py build/j71b-capture.so > build/fixture.conf
+          # Real-session harness is not yet qualified; syntax-check only.
+          python3 -m py_compile test_desktop_session.py
+      - name: Test desktop lifecycle and packaging policy without a daemon
+        run: python3 -m unittest discover -s tests -p 'test_j71b*.py' -v
+      - name: Verify native rootfs microphone compilation
+        if: matrix.runner == 'ubuntu-24.04-arm'
+        run: |
+          python3 system/microphone.py --root experiments/j71b-capture/build/staged-root
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          from system.microphone import PLUGIN, RECEIPT, verify_files
+          root = Path('experiments/j71b-capture/build/staged-root')
+          verify_files({name: (root / name).read_bytes() for name in (PLUGIN, RECEIPT)})
+          print('Native AArch64 rootfs plugin and source receipt verified')
+          PYCODE
       - name: Package opt-in native ARM hardware test
         if: matrix.runner == 'ubuntu-24.04-arm'
         working-directory: experiments/j71b-capture

@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 
 from .common import group_membership, PROJECT, SYSTEM, NETWORK_RULE
+from system.microphone import verify_archive as verify_microphone_archive
 from release.package_permissions import privileged_entries, apply as apply_package_permissions
 
 
@@ -145,6 +146,8 @@ def build(base, base_receipt, outdir, release, cursor_tools, bluetooth_tools=Non
     record = json.loads(base_receipt.read_text())
     if base.is_symlink() or base.stat().st_size != record['bytes'] or sha(base) != record['sha256']:
         raise ValueError('Base root differs from receipt')
+    # Cached bases must contain the current native DSP, not merely a valid tar hash.
+    verify_microphone_archive(base)
     privileges = privileged_entries(base)
     privileged_digests = {}
     additions = cursor_files(cursor_tools)

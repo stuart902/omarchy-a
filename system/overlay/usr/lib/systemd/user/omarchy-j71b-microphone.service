@@ -1,0 +1,20 @@
+[Unit]
+Description=J71b conditioned microphone (experimental, opt-in)
+Requisite=pipewire.service wireplumber.service
+After=pipewire.service wireplumber.service
+ConditionArchitecture=arm64
+ConditionPathExists=/proc/device-tree/compatible
+
+[Service]
+Type=simple
+ExecCondition=/usr/bin/python3 /usr/lib/omarchy-j71b-microphone/desktop_mic.py --check-platform
+ExecStart=/usr/bin/python3 /usr/lib/omarchy-j71b-microphone/desktop_mic.py
+Restart=no
+# Main handles SIGTERM by stopping only its filter and checking idle. An
+# ownership fault must not trigger an automatic kill/restart/reopen cycle.
+KillMode=mixed
+SendSIGKILL=no
+TimeoutStopSec=20s
+UMask=0077
+
+# Deliberately no [Install] section: device qualification precedes autostart.

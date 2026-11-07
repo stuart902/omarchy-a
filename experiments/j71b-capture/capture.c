@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT
- * Experimental capture conditioning, not installed by the distribution.
+ * J71b capture conditioning; desktop service remains explicitly opt-in.
  */
 #include <ladspa.h>
 #include <math.h>

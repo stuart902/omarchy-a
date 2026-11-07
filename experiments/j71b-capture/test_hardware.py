@@ -77,6 +77,7 @@ class HardwarePolicy(unittest.TestCase):
         self.assertIs(output['node.autoconnect'], False)
         self.assertEqual(output['media.class'], 'Audio/Source')
         self.assertLess(output['priority.session'], 0)
+        self.assertEqual(output['priority.driver'], 0)
         self.assertEqual(args['filter.graph']['nodes'][0]['control']['Gain (dB)'], 12)
 
     def test_exact_routes_accepted(self):
