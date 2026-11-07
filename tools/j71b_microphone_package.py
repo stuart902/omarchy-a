@@ -190,22 +190,44 @@ def properties(obj):
     return obj.get('info', {}).get('props', obj.get('props', {}))
 
 
-def running_wireplumber(data):
-    clients = [obj for obj in data if obj.get('type') == 'PipeWire:Interface:Client'
-               and (properties(obj).get('application.name') == 'WirePlumber'
+def running_wireplumber(data, expected_uid=None):
+    # WP 0.5.18's client-context.c copies the main core properties, adds
+    # wireplumber.client-context=true and appends " [client]" to the name.
+    # It is one daemon with two connections, not a second policy manager.
+    clients = [properties(obj) for obj in data if obj.get('type') == 'PipeWire:Interface:Client'
+               and (str(properties(obj).get('application.name', '')).startswith('WirePlumber')
                     or properties(obj).get('application.process.binary') == 'wireplumber'
-                    or properties(obj).get('wireplumber.daemon') is True)]
-    require(len(clients) == 1, 'Missing/ambiguous running WirePlumber client')
-    props = properties(clients[0])
-    require(props.get('application.name') == 'WirePlumber'
-            and props.get('application.process.binary') == 'wireplumber'
-            and props.get('application.version') == EXPECTED['wireplumber']
-            and props.get('wireplumber.daemon') is True
-            and props.get('wireplumber.profile') == 'main',
-            'Running WirePlumber identity/version/profile differs from qualified session')
-    serial = str(props.get('object.serial', ''))
-    require(serial.isdecimal(), 'Running WirePlumber lacks a client serial')
-    return serial
+                    or properties(obj).get('wireplumber.daemon') is True
+                    or properties(obj).get('wireplumber.client-context') is True)]
+    require(1 <= len(clients) <= 2, 'Missing/ambiguous running WirePlumber clients')
+    identities, credentials = {}, set()
+    for props in clients:
+        name = props.get('application.name')
+        role = {'WirePlumber': 'main', 'WirePlumber [client]': 'client'}.get(name)
+        require(role is not None and role not in identities,
+                'Missing/ambiguous running WirePlumber main/client roles')
+        require(props.get('application.process.binary') == 'wireplumber'
+                and props.get('application.version') == EXPECTED['wireplumber']
+                and props.get('wireplumber.daemon') is True
+                and props.get('wireplumber.profile') == 'main'
+                and props.get('wireplumber.client-context', False) is (role == 'client'),
+                'Running WirePlumber identity/version/profile/context differs from qualified session')
+        # pipewire.sec.* is the server-reported peer identity, unlike the
+        # application's self-declared process ID. Both connections must agree.
+        peer = tuple(str(props.get('pipewire.sec.' + key, '')) for key in ('pid', 'uid', 'gid'))
+        require(all(value.isdecimal() for value in peer) and int(peer[0]) > 0
+                and str(props.get('application.process.id', '')) == peer[0],
+                'Running WirePlumber lacks a consistent server-reported process identity')
+        require(expected_uid is None or int(peer[1]) == expected_uid,
+                'Running WirePlumber belongs to a different desktop user')
+        credentials.add(tuple(int(value) for value in peer))
+        serial = str(props.get('object.serial', ''))
+        require(serial.isdecimal() and serial not in identities.values(),
+                'Running WirePlumber lacks distinct client serials')
+        identities[role] = serial
+    require('main' in identities and len(credentials) == 1,
+            'Missing/conflicting running WirePlumber daemon identity')
+    return identities
 
 
 def idle_graph(data):
@@ -373,13 +395,13 @@ class LiveChecker:
                 and not socket.is_symlink(), 'Existing desktop-user PipeWire socket required')
         graph = json.loads(self.user_command(['/usr/bin/pw-dump']))
         serial = idle_graph(graph)
-        wireplumber_serial = running_wireplumber(graph)
+        wireplumber_serials = running_wireplumber(graph, self.user.pw_uid)
         defaults = [o.get('metadata', []) for o in graph if o.get('type') == 'PipeWire:Interface:Metadata'
                     and properties(o).get('metadata.name') == 'default']
         return {'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
                 'machine_id_sha256': digest(Path('/etc/machine-id').read_bytes()),
                 'os_release_sha256': digest(Path('/etc/os-release').read_bytes()),
-                'operator_verified_image': image_id, 'operator_hardware_healthy': True, 'runtime': observed, 'raw_serial': serial, 'wireplumber_client_serial': wireplumber_serial,
+                'operator_verified_image': image_id, 'operator_hardware_healthy': True, 'runtime': observed, 'raw_serial': serial, 'wireplumber_client_serials': wireplumber_serials,
                 'kernel_sha256': reviewed_kernel_sha256, 'service': state,
                 'default_metadata_sha256': digest(json_bytes(defaults)),
                 'user': self.user.pw_name, 'uid': self.user.pw_uid,

@@ -127,7 +127,10 @@ sudo python3 package.py preflight --operation install --user DESKTOP_USER \
 
 The check requires exact J71b/T8010/AArch64 and runtime versions; readable
 healthy current-boot logs; active existing PipeWire/WirePlumber with the running WirePlumber client
-identity, main profile and version matching 0.5.18; no audio/loader
+identity, main profile and version matching 0.5.18. Its main connection and
+optional marked client-context connection must belong to the same server-verified
+process/user/group, with distinct serials; conflicting or additional daemons
+are refused; no audio/loader
 overrides in the user manager; no matching unit, drop-in or generic service
 override; no persistent marker; no supervisor/cgroup process; no failed/hung
 unit; no conditioned nodes; and the precise two-channel raw ALSA source

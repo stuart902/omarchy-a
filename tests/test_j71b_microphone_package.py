@@ -58,7 +58,9 @@ def raw_graph():
             {'id': 20, 'type': 'PipeWire:Interface:Client', 'info': {'props': {
                 'application.name': 'WirePlumber', 'application.process.binary': 'wireplumber',
                 'application.version': '0.5.18', 'wireplumber.daemon': True,
-                'wireplumber.profile': 'main', 'object.serial': 120}}}]
+                'wireplumber.profile': 'main', 'object.serial': 120,
+                'application.process.id': 500, 'pipewire.sec.pid': 500,
+                'pipewire.sec.uid': 1000, 'pipewire.sec.gid': 1000}}}]
 
 
 def fixture_files():
@@ -415,7 +417,7 @@ class ReadOnlyChecker(unittest.TestCase):
 
 
     def test_running_wireplumber_exact_version_and_identity(self):
-        self.assertEqual(self.snapshot()['wireplumber_client_serial'], '120')
+        self.assertEqual(self.snapshot()['wireplumber_client_serials'], {'main': '120'})
         for key, value in [('application.version', '0.5.17'), ('application.name', 'Other manager'),
                            ('application.process.binary', 'other'), ('wireplumber.daemon', False),
                            ('wireplumber.profile', 'custom'), ('object.serial', '')]:
@@ -432,6 +434,57 @@ class ReadOnlyChecker(unittest.TestCase):
             self.snapshot()
         self.graph.extend([client, deepcopy(client)])
         with self.assertRaisesRegex(ValueError, 'Missing/ambiguous running WirePlumber'):
+            self.snapshot()
+
+    def add_wireplumber_client_context(self):
+        # Minimal synthetic counterpart of the two retained 0.5.18 clients.
+        # Deliberately contains no device username, hostname or private IDs.
+        client = deepcopy(self.graph[2])
+        client['id'] = 21
+        client['info']['props'].update({'application.name': 'WirePlumber [client]',
+                                       'wireplumber.client-context': True, 'object.serial': 121})
+        self.graph.append(client)
+        return client['info']['props']
+
+    def test_same_daemon_main_and_client_context_pair_is_accepted_and_bound(self):
+        props = self.add_wireplumber_client_context()
+        self.assertEqual(self.snapshot()['wireplumber_client_serials'], {'main': '120', 'client': '121'})
+        props['object.serial'] = 122
+        self.assertEqual(self.snapshot()['wireplumber_client_serials'], {'main': '120', 'client': '122'})
+        # Registry order does not determine the roles or preflight identity.
+        self.graph[2], self.graph[3] = self.graph[3], self.graph[2]
+        self.assertEqual(self.snapshot()['wireplumber_client_serials'], {'main': '120', 'client': '122'})
+
+    def test_client_context_must_share_verified_daemon_identity(self):
+        props = self.add_wireplumber_client_context()
+        for key, value in [('pipewire.sec.pid', 501), ('pipewire.sec.uid', 1001),
+                           ('pipewire.sec.gid', 1001), ('application.process.id', 501),
+                           ('pipewire.sec.pid', ''), ('application.version', '0.5.17'),
+                           ('application.process.binary', 'other'), ('wireplumber.profile', 'other'),
+                           ('wireplumber.daemon', False), ('wireplumber.client-context', False),
+                           ('application.name', 'WirePlumber'), ('object.serial', 120),
+                           ('object.serial', '')]:
+            old = props[key]
+            props[key] = value
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, 'WirePlumber'):
+                self.snapshot()
+            props[key] = old
+        # Even internally consistent credentials from a second daemon fail.
+        props.update({'pipewire.sec.pid': 501, 'application.process.id': 501})
+        with self.assertRaisesRegex(ValueError, 'conflicting'):
+            self.snapshot()
+
+    def test_client_context_without_main_or_extra_daemon_is_refused(self):
+        self.add_wireplumber_client_context()
+        main = self.graph.pop(2)
+        with self.assertRaisesRegex(ValueError, 'Missing/conflicting'):
+            self.snapshot()
+        self.graph.append(main)
+        other = deepcopy(main)
+        other['info']['props'].update({'pipewire.sec.pid': 501, 'application.process.id': 501,
+                                      'object.serial': 122})
+        self.graph.append(other)
+        with self.assertRaisesRegex(ValueError, 'Missing/ambiguous'):
             self.snapshot()
 
     def test_stale_kernel_review_and_current_fault_refuse(self):
