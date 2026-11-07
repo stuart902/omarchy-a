@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 
 import numpy as np
 
@@ -216,7 +217,9 @@ wireplumber.profiles = {
                                 'WirePlumber selects synthetic fallback default')
         raw = nodes(data, self.runtime.SOURCE)[0]
         self.source_id, self.serial = raw['id'], str(props(raw)['object.serial'])
-        self.run('pw-cli', 'set-param', str(self.source_id), 'Props', '{ volume: 0.02 }')
+        # The adapter forwards volume to audiotestsrc and also applies it.
+        # Leave ample nonzero signal for both raw and +12 dB conditioned PCM.
+        self.run('pw-cli', 'set-param', str(self.source_id), 'Props', '{ volume: 0.1 }')
         self.write('initial-graph.json', self.dump())
 
     def supervisor(self, index):
@@ -301,9 +304,11 @@ def finish_recording(session, child, path, rate, channels, bounded=True):
     if bounded:
         assert np.max(np.abs(samples)) <= 10 ** (-1 / 20) + 1e-5
     rms = np.sqrt(np.mean(samples[-rate // 4:] ** 2, axis=0))
-    assert np.all(rms > .001), f'Silent channel: {rms}'
-    return {'frames': len(samples), 'rate': rate, 'channels': channels,
-            'peak': float(np.max(np.abs(samples))), 'rms': rms.tolist(), 'exit': code}
+    assert np.all(rms > .001), f'{path.name}: silent channel: {rms}'
+    result = {'frames': len(samples), 'rate': rate, 'channels': channels,
+              'peak': float(np.max(np.abs(samples))), 'rms': rms.tolist(), 'exit': code}
+    session.write('recording-summary-' + path.stem + '.json', result)
+    return result
 
 
 def record(session, rate, channels, name, use_default=False):
@@ -527,10 +532,14 @@ def main():
                 for obj in json.loads(graph.read_text()):
                     if obj['type'].endswith(('Node', 'Metadata', 'Link')):
                         print(json.dumps(obj), flush=True)
-            raise
+            # Every case gets fresh private synthetic services and state.
+            # Preserve independent fault evidence even if another case fails.
+            traceback.print_exc()
         finally:
             session.close()
             (root / 'results.json').write_text(json.dumps(reports, indent=2))
+    if any(report['status'] != 'passed' for report in reports):
+        return 1
     print('PASS: real synthetic session and actual supervisor; no hardware or systemd-manager qualification')
     return 0
 
