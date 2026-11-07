@@ -32,7 +32,8 @@ INPUTS = {
     'bluetooth': ['desktop/build-bluetooth-tools', 'desktop/bluetooth'],
     'labwc': ['desktop/build-labwc', 'desktop/labwc'],
     'base': ['system/build-rootfs', 'system/assemble-rootfs', 'system/Containerfile',
-             'system/install-toolchain', 'system/packages.txt'],
+             'system/install-toolchain', 'system/packages.txt', 'system/microphone.py',
+             'experiments/j71b-capture/capture.c'],
     'artwork': ['boot/build-artwork', 'boot/generate-logo.py', 'boot/splash.py', 'boot/artwork'],
 }
 
