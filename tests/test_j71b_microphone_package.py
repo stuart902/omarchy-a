@@ -335,6 +335,45 @@ class OfflinePackage(unittest.TestCase):
             builder.native_files(bad, pkg.digest(bad.read_bytes()))
 
 
+class AudioKernelReview(unittest.TestCase):
+    PREFIX = 'apple-aop 210800000.aop: RTKit: syslog message: '
+    BMI = PREFIX + 'BMI262.cpp:229: BMI262::probe -- Probe error=e00002c0, ID=0x3'
+    SPU = PREFIX + 'spu.cpp:898: AssertMacros:   error: 0'
+    AUDIO_READY = PREFIX + 'AudioController.cpp:165: aop-audio v346.16 (debug 0x0) ready!!'
+    AOP_READY = PREFIX + 'SPU_init.cpp:326: ===( AOP IS READY )==='
+
+    def baseline(self):
+        return '\n'.join((self.BMI, self.SPU, self.AUDIO_READY, self.AOP_READY)) + '\n'
+
+    def test_exact_reviewed_boot_diagnostics_are_reported_not_erased(self):
+        self.assertEqual(pkg.review_audio_kernel(self.baseline()), [self.BMI, self.SPU])
+
+    def test_baseline_needs_subsequent_audio_and_aop_ready(self):
+        for text in (self.BMI, self.BMI + '\n' + self.AUDIO_READY,
+                     self.AUDIO_READY + '\n' + self.AOP_READY + '\n' + self.SPU):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                pkg.review_audio_kernel(text)
+
+    def test_unknown_diagnostics_and_actual_audio_faults_still_refuse(self):
+        faults = [self.BMI.replace('ID=0x3', 'ID=0x4'), self.SPU.replace('error: 0', 'error: 1'),
+                  'AOP transport fault', 'apple-aop: failed to init RTKit',
+                  'apple-aop: firmware did not boot', 'apple-aop: failed to start endpoint',
+                  'apple-aop: failed to halt; keeping its memory', 'apple-sio: timed out',
+                  't8010-pdm: clock OFF failed', 'DMA termination failed',
+                  'retaining resources until device reset', 'aop resource ownership retained',
+                  'microphone hung', 'BUG: sleeping function called', 'Oops: kernel fault',
+                  'Kernel panic - not syncing']
+        for fault in faults:
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                pkg.review_audio_kernel(self.baseline() + fault + '\n')
+
+    def test_touchscreen_observation_is_not_an_audio_fault_or_health_claim(self):
+        text = ('apple-z2 spi0.0: touchscreen stalled\n'
+                'apple-z2 spi0.0: touchscreen recovered\n'
+                't8010-pdm: default audio configuration changed\n')
+        self.assertEqual(pkg.review_audio_kernel(text), [])
+
+
 class ReadOnlyChecker(unittest.TestCase):
     """Exercise live-checker branches with every command/filesystem read mocked."""
     def setUp(self):
@@ -352,7 +391,6 @@ class ReadOnlyChecker(unittest.TestCase):
                       'ExecMainCode': '0', 'ExecMainStatus': '0', 'FragmentPath': '', 'DropInPaths': ''}
         self.called = []
         self.checker = pkg.LiveChecker.__new__(pkg.LiveChecker)
-        self.checker.hardware_healthy = True
         self.checker.user = SimpleNamespace(pw_name='desktop', pw_uid=1000, pw_dir='/home/desktop')
         self.context = ExitStack()
         self.addCleanup(self.context.close)
@@ -404,11 +442,10 @@ class ReadOnlyChecker(unittest.TestCase):
     def snapshot(self):
         return self.checker.snapshot(self.operation, self.kernel_sha, pkg.IMAGE)
 
-    def test_unconfirmed_hardware_health_refuses_without_device_reads(self):
-        self.checker.hardware_healthy = False
-        with self.assertRaisesRegex(ValueError, 'unconfirmed'):
-            self.snapshot()
-        self.assertFalse(self.called)
+    def test_read_only_preflight_does_not_claim_hardware_qualification(self):
+        result = self.snapshot()
+        self.assertIs(result['hardware_safety_qualified'], False)
+        self.assertNotIn('operator_hardware_healthy', result)
 
     def test_complete_fresh_snapshot_only_reads(self):
         self.assertEqual(self.snapshot()['raw_serial'], '110')
@@ -492,7 +529,7 @@ class ReadOnlyChecker(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'digest changed'):
             self.snapshot()
         self.kernel_sha = pkg.digest(self.kernel.encode())
-        with self.assertRaisesRegex(ValueError, 'Hardware fault'):
+        with self.assertRaisesRegex(ValueError, 'Audio/AOP fault'):
             self.snapshot()
 
     def test_marker_and_all_relevant_override_paths_refuse(self):

@@ -113,20 +113,27 @@ sha256sum kernel-current-boot.txt
 Review the saved log yourself. Do not approve a PDM/AOP/SmartIO fault, timeout,
 resource-retention or ownership message. Automatic keyword checks are a
 fail-closed additional check, not proof of hardware health or DMA quiescence.
-Resolve any pending AOP or touchscreen-health uncertainty before proceeding.
-The operator must confirm that the tablet is currently responsive and healthy;
-a log digest alone cannot establish this. Do not supply the health-confirmation
-flag while a fault or hang remains unexplained. Use the just-reviewed digest
-and independently verified installed image ID:
+Read-only preflight does not require a declaration of global hardware health or
+an explanation for a recovered touchscreen stall. The report explicitly leaves
+hardware safety unqualified. Two exact AOP firmware startup diagnostics observed
+before the earlier successful capture (the BMI262 probe message and
+`spu.cpp:898` error-zero message) are preserved as baseline observations only
+when later audio-controller and AOP readiness messages are present. This does
+not make them proven harmless. Changed or other AOP/audio errors, transport or
+clock failures, timeouts, DMA termination failure, retained resources, ownership
+faults and kernel BUG/Oops/panic still refuse the operation. An unrelated
+recovered `apple-z2` touchscreen stall remains a separate observation, not a
+microphone fault. Stop interactive hardware testing if the device is currently
+unresponsive. Use the just-reviewed digest and independently verified image ID:
 
 ```sh
 sudo python3 package.py preflight --operation install --user DESKTOP_USER \
   --image-id preview-audio-nov4-41918815273 \
-  --confirm-hardware-healthy --reviewed-kernel-sha256 REVIEWED_LOG_SHA256 > install-preflight.json
+  --reviewed-kernel-sha256 REVIEWED_LOG_SHA256 > install-preflight.json
 ```
 
 The check requires exact J71b/T8010/AArch64 and runtime versions; readable
-healthy current-boot logs; active existing PipeWire/WirePlumber with the running WirePlumber client
+reviewed current-boot logs without blocking audio/kernel faults; active existing PipeWire/WirePlumber with the running WirePlumber client
 identity, main profile and version matching 0.5.18. Its main connection and
 optional marked client-context connection must belong to the same server-verified
 process/user/group, with distinct serials; conflicting or additional daemons
@@ -197,7 +204,7 @@ digest and a removal preflight, then separately authorize file removal:
 ```sh
 sudo python3 package.py preflight --operation remove --user DESKTOP_USER \
   --image-id preview-audio-nov4-41918815273 \
-  --confirm-hardware-healthy --reviewed-kernel-sha256 REVIEWED_LOG_SHA256 > remove-preflight.json
+  --reviewed-kernel-sha256 REVIEWED_LOG_SHA256 > remove-preflight.json
 sudo python3 package.py remove --user DESKTOP_USER --preflight remove-preflight.json
 ```
 

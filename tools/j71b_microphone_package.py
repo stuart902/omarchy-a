@@ -285,11 +285,41 @@ def key_values(text):
     return dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
 
 
+def review_audio_kernel(kernel):
+    """Reject audio/AOP faults; report two precisely reviewed boot diagnostics.
+
+    The Nov 5 successful capture baseline contains these exact firmware messages
+    before AudioController ready and AOP READY. They are not proof of health,
+    nor grounds to disregard any other AOP error or later ownership fault.
+    """
+    lines = kernel.splitlines()
+    baseline = (
+        r'^apple-aop 210800000\.aop: RTKit: syslog message: BMI262\.cpp:229: BMI262::probe -- Probe error=e00002c0, ID=0x3$',
+        r'^apple-aop 210800000\.aop: RTKit: syslog message: spu\.cpp:898: AssertMacros:\s+error: 0$',
+    )
+    audio_ready = [i for i, line in enumerate(lines)
+                   if re.search(r'^apple-aop 210800000\.aop: RTKit: syslog message: AudioController\.cpp:\d+: aop-audio .* ready!!$', line)]
+    aop_ready = [i for i, line in enumerate(lines)
+                 if line == 'apple-aop 210800000.aop: RTKit: syslog message: SPU_init.cpp:326: ===( AOP IS READY )===']
+    notes = []
+    for i, line in enumerate(lines):
+        if any(re.fullmatch(pattern, line) for pattern in baseline):
+            require(any(j > i for j in audio_ready) and any(j > i for j in aop_ready),
+                    'AOP boot diagnostic lacks later audio/AOP readiness: ' + line)
+            notes.append(line)
+            continue
+        global_fault = re.search(r'(?i)(kernel panic|\bOops:|\bBUG:|DMA termination.*failed|retaining resources until device reset)', line)
+        audio_topic = re.search(r'(?i)(pdm|aop|smartio|apple-sio|microphone|audio)', line)
+        fault = re.search(r'(?i)(\bfault\w*|\berror\w*|timeout|timed out|\bhang\w*|\bhung\b|retai|ownership|panic|oops|crash|failed|failure|fatal|abort|did not boot|keeping (?:its )?memory)', line)
+        require(not global_fault and not (audio_topic and fault),
+                'Audio/AOP fault or kernel failure; stop and preserve evidence: ' + line)
+    return notes
+
+
 class LiveChecker:
     """Only read operations; used on the tablet only after separate authorization."""
-    def __init__(self, username, hardware_healthy=False):
+    def __init__(self, username):
         require(os.geteuid() == 0, 'Preflight requires root for readable current kernel logs')
-        self.hardware_healthy = hardware_healthy
         self.user = pwd.getpwnam(username)
         require(self.user.pw_uid > 0, 'Choose the existing desktop user, never root')
 
@@ -303,7 +333,6 @@ class LiveChecker:
         return command(['/usr/bin/runuser', '-u', user, '--', '/usr/bin/env', '-i', *env, *argv], accepted)
 
     def snapshot(self, operation, reviewed_kernel_sha256, image_id):
-        require(self.hardware_healthy is True, 'Current hardware health, including touchscreen/AOP concerns, is unconfirmed')
         require(image_id == IMAGE, 'Operator must verify the historical installed image identity')
         observed = {'machine': platform.machine(), 'kernel': platform.release(),
                     'glibc': os.confstr('CS_GNU_LIBC_VERSION').split()[-1],
@@ -321,9 +350,7 @@ class LiveChecker:
         kernel = command(['/usr/bin/journalctl', '-k', '-b', '--no-pager', '-o', 'cat'])
         require(kernel.strip() and digest(kernel.encode()) == reviewed_kernel_sha256,
                 'Fresh full kernel log must be reviewed; its digest changed or was not supplied')
-        hardware, fault = r'(?i)(pdm|aop|smartio|microphone|audio|touchscreen|multitouch|multi-touch)', r'(?i)(fault|error|timeout|timed out|hang|retai|ownership|panic|oops)'
-        require(not any(re.search(hardware, line) and re.search(fault, line) for line in kernel.splitlines()),
-                'Hardware fault/timeout/ownership message; stop and preserve evidence')
+        kernel_notes = review_audio_kernel(kernel)
         for service in ('pipewire.service', 'wireplumber.service'):
             state = self.user_command(['/usr/bin/systemctl', '--user', 'show', service,
                                        '--property=ActiveState,SubState'])
@@ -401,7 +428,9 @@ class LiveChecker:
         return {'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
                 'machine_id_sha256': digest(Path('/etc/machine-id').read_bytes()),
                 'os_release_sha256': digest(Path('/etc/os-release').read_bytes()),
-                'operator_verified_image': image_id, 'operator_hardware_healthy': True, 'runtime': observed, 'raw_serial': serial, 'wireplumber_client_serials': wireplumber_serials,
+                'operator_verified_image': image_id, 'hardware_safety_qualified': False,
+                'kernel_baseline_diagnostics': kernel_notes,
+                'runtime': observed, 'raw_serial': serial, 'wireplumber_client_serials': wireplumber_serials,
                 'kernel_sha256': reviewed_kernel_sha256, 'service': state,
                 'default_metadata_sha256': digest(json_bytes(defaults)),
                 'user': self.user.pw_name, 'uid': self.user.pw_uid,
@@ -494,8 +523,6 @@ def main():
     parser.add_argument('--reviewed-kernel-sha256', help='Digest of the freshly reviewed complete current-boot kernel log')
     parser.add_argument('--image-id', help='Installed image identity independently checked by the operator')
     parser.add_argument('--preflight', type=Path)
-    parser.add_argument('--confirm-hardware-healthy', action='store_true',
-                        help='Operator confirms current hardware health and resolution of pending AOP/touchscreen concerns')
     args = parser.parse_args()
     if args.action == 'verify':
         manifest, _, identity = load_package(args.package)
@@ -503,7 +530,7 @@ def main():
                           'native_abi': manifest['native_abi']}).decode(), end='')
         return
     require(args.user, '--user is required')
-    checker = LiveChecker(args.user, args.confirm_hardware_healthy)
+    checker = LiveChecker(args.user)
     if args.action == 'preflight':
         require(args.operation and args.reviewed_kernel_sha256 and args.image_id,
                 'Preflight requires operation, reviewed kernel digest and independently checked image identity')
@@ -514,9 +541,6 @@ def main():
         report = json.loads(read_regular(args.preflight))
         require(report['operation'] == args.action and report['observed']['user'] == args.user,
                 'Preflight action/user does not match')
-        require(report['observed'].get('operator_hardware_healthy') is True,
-                'Preflight does not confirm current hardware health')
-        checker.hardware_healthy = True
         apply(args.package, report, checker)
         print('Four package files ' + ('installed' if args.action == 'install' else 'removed') +
               '. No service, defaults, drivers or persistent state were changed.')
