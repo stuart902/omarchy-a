@@ -89,6 +89,15 @@ def server_config(runtime):
             synthetic(runtime.SOURCE, 100), synthetic(FALLBACK, 2000)]}
 
 
+def client_config(config):
+    # pw-dump must load the metadata protocol marshal to bind and report
+    # WirePlumber's default metadata, just like the upstream client.conf.
+    return {'context.spa-libs': config['context.spa-libs'],
+            'context.modules': [{'name': 'libpipewire-module-' + name}
+                                for name in ('protocol-native', 'client-node',
+                                             'adapter', 'metadata')]}
+
+
 class Session:
     def __init__(self, directory, plugin, wp_config):
         directory.mkdir(mode=0o700)
@@ -122,6 +131,9 @@ class Session:
     def run(self, *command):
         result = subprocess.run(command, env=self.env, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=10)
+        if result.stderr:
+            with (self.root / 'commands.log').open('a') as log:
+                log.write(repr(command) + '\n' + result.stderr + '\n')
         if result.returncode:
             raise AssertionError(f'{command}: {result.stderr}')
         return result.stdout
@@ -171,10 +183,7 @@ class Session:
 
     def boot(self):
         config = server_config(self.runtime)
-        client = {'context.spa-libs': config['context.spa-libs'],
-                  'context.modules': [{'name': 'libpipewire-module-' + name}
-                                      for name in ('protocol-native', 'client-node', 'adapter')]}
-        self.write('client.conf', client)
+        self.write('client.conf', client_config(config))
         self.daemon = self.start('daemon', ['pipewire', '-c', self.write('server.conf', config)])
         deadline = time.monotonic() + 5
         while not (self.root / REMOTE).exists():

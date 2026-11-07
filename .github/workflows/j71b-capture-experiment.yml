@@ -162,23 +162,18 @@ jobs:
         if: always()
         shell: bash
         run: |
-          python3 - <<'PYCODE'
-          import os
-          from pathlib import Path
-          import shutil
-
-          source = Path(os.environ['RUNNER_TEMP']) / 'j71b-desktop-session-logs'
-          destination = Path('experiments/j71b-capture/build/session-diagnostics')
-          destination.mkdir(parents=True, exist_ok=True)
-          for path in source.rglob('*'):
-              if path.is_symlink() or not path.is_file():
-                  continue
-              if path.suffix not in {'.log', '.txt', '.json'}:
-                  continue
-              target = destination / path.relative_to(source)
-              target.parent.mkdir(parents=True, exist_ok=True)
-              shutil.copyfile(path, target)
-          PYCODE
+          set -euo pipefail
+          source="$RUNNER_TEMP/j71b-desktop-session-logs"
+          destination="$GITHUB_WORKSPACE/experiments/j71b-capture/build/session-diagnostics"
+          mkdir -p "$destination"
+          if [ -d "$source" ]; then
+            cd "$source"
+            find . -type f \( -name '*.log' -o -name '*.txt' -o -name '*.json' \) -print0 |
+              while IFS= read -r -d '' diagnostic; do
+                mkdir -p "$destination/$(dirname "$diagnostic")"
+                cp -- "$diagnostic" "$destination/$diagnostic"
+              done
+          fi
       - name: Preserve diagnostic logs, never audio samples
         uses: actions/upload-artifact@v4
         if: always()

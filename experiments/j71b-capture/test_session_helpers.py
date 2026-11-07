@@ -1,10 +1,15 @@
 """Pure helper checks for the CI session harness; never launch a process."""
 import unittest
 
-from test_desktop_session import FALLBACK, default_source, props
+from test_desktop_session import FALLBACK, client_config, default_source, props
 
 
 class SessionHelpers(unittest.TestCase):
+    def test_client_can_bind_metadata(self):
+        config = client_config({'context.spa-libs': {}})
+        self.assertIn({'name': 'libpipewire-module-metadata'},
+                      config['context.modules'])
+
     def test_metadata_uses_top_level_properties(self):
         metadata = {'type': 'PipeWire:Interface:Metadata',
                     'props': {'metadata.name': 'default'},
