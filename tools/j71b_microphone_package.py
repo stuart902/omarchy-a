@@ -316,6 +316,51 @@ def review_audio_kernel(kernel):
     return notes
 
 
+def review_kernel_snapshot(kernel, reviewed_sha256):
+    """Prove the reviewed prefix; allow only the observed routine motion tail."""
+    require(kernel.strip() and re.fullmatch('[0-9a-f]{64}', reviewed_sha256) is not None,
+            'A reviewed kernel-log SHA256 is required')
+    data = kernel.encode()
+    notes = review_audio_kernel(kernel)  # Never hide a fault behind a stale-log error.
+    prefix_size = None
+    if digest(data) == reviewed_sha256:
+        prefix_size = len(data)
+    else:
+        checksum, size = hashlib.sha256(), 0
+        for line in data.splitlines(keepends=True):
+            checksum.update(line)
+            size += len(line)
+            if checksum.hexdigest() == reviewed_sha256:
+                prefix_size = size
+                break
+    require(prefix_size is not None,
+            'Current boot log no longer contains the reviewed prefix; review the new log before continuing')
+    added = data[prefix_size:].decode().splitlines()
+    routine_motion = re.compile(
+        r'^apple-aop 210800000\.aop: RTKit: syslog message: CMSPUActivity\.cpp:359: '
+        r'\[Activity\] motionState,\d+->\d+,notificationTime,\d+$')
+    for line in added:
+        require(routine_motion.fullmatch(line) is not None,
+                'New kernel diagnostic needs review before continuing: ' + line)
+    return {'kernel_sha256': reviewed_sha256, 'kernel_current_sha256': digest(data),
+            'kernel_routine_motion_lines': len(added), 'kernel_baseline_diagnostics': notes}
+
+
+def preflight_binding(report):
+    """Benign log growth is evidence, not a change to install eligibility.
+
+    The fresh snapshot has already proved the same reviewed prefix, inspected
+    the complete log for audio faults, and allowed only exact motion messages.
+    All other package/boot/user/service/source/default/ownership fields bind.
+    """
+    binding = {key: value for key, value in report.items() if key != 'created_at'}
+    observed = dict(binding['observed'])
+    for key in ('kernel_current_sha256', 'kernel_routine_motion_lines'):
+        observed.pop(key, None)
+    binding['observed'] = observed
+    return binding
+
+
 class LiveChecker:
     """Only read operations; used on the tablet only after separate authorization."""
     def __init__(self, username):
@@ -348,9 +393,7 @@ class LiveChecker:
         compatible = Path('/proc/device-tree/compatible').read_bytes().decode().rstrip('\0').split('\0')
         require({'apple,j71b', 'apple,t8010'} <= set(compatible), 'Wrong board')
         kernel = command(['/usr/bin/journalctl', '-k', '-b', '--no-pager', '-o', 'cat'])
-        require(kernel.strip() and digest(kernel.encode()) == reviewed_kernel_sha256,
-                'Fresh full kernel log must be reviewed; its digest changed or was not supplied')
-        kernel_notes = review_audio_kernel(kernel)
+        kernel_review = review_kernel_snapshot(kernel, reviewed_kernel_sha256)
         for service in ('pipewire.service', 'wireplumber.service'):
             state = self.user_command(['/usr/bin/systemctl', '--user', 'show', service,
                                        '--property=ActiveState,SubState'])
@@ -429,9 +472,9 @@ class LiveChecker:
                 'machine_id_sha256': digest(Path('/etc/machine-id').read_bytes()),
                 'os_release_sha256': digest(Path('/etc/os-release').read_bytes()),
                 'operator_verified_image': image_id, 'hardware_safety_qualified': False,
-                'kernel_baseline_diagnostics': kernel_notes,
+                **kernel_review,
                 'runtime': observed, 'raw_serial': serial, 'wireplumber_client_serials': wireplumber_serials,
-                'kernel_sha256': reviewed_kernel_sha256, 'service': state,
+                'service': state,
                 'default_metadata_sha256': digest(json_bytes(defaults)),
                 'user': self.user.pw_name, 'uid': self.user.pw_uid,
                 'state_homes': sorted(str(p) for p in homes)}
@@ -481,8 +524,7 @@ def apply(package, report, checker, root=Path('/'), owner=0, now=None):
     observed = report['observed']
     fresh = preflight(package, operation, checker, observed['kernel_sha256'],
                       observed['operator_verified_image'], root, owner, now)
-    require({k: v for k, v in fresh.items() if k != 'created_at'}
-            == {k: v for k, v in report.items() if k != 'created_at'},
+    require(preflight_binding(fresh) == preflight_binding(report),
             'Device/session/package changed after preflight; stop and review again')
     _, payload, _ = load_package(package)
     # No directory removal: without an extra persistent ownership receipt, we
@@ -520,7 +562,7 @@ def main():
     parser.add_argument('--package', type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument('--user', help='Existing desktop username; never root')
     parser.add_argument('--operation', choices=('install', 'remove'))
-    parser.add_argument('--reviewed-kernel-sha256', help='Digest of the freshly reviewed complete current-boot kernel log')
+    parser.add_argument('--reviewed-kernel-sha256', help='Digest of the reviewed current-boot log prefix; only exact routine AOP motion additions are allowed')
     parser.add_argument('--image-id', help='Installed image identity independently checked by the operator')
     parser.add_argument('--preflight', type=Path)
     args = parser.parse_args()
@@ -550,4 +592,4 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, KeyError, TypeError, struct.error, subprocess.SubprocessError) as error:
-        raise SystemExit('Refused: ' + str(error) + '\nDo not retry after a fault. Preserve evidence; no automatic cleanup or recovery was attempted.')
+        raise SystemExit('Refused: ' + str(error) + '\nNo automatic cleanup or recovery was attempted. Inspect this reason before continuing; if an audio fault was reported, stop testing and preserve evidence.')

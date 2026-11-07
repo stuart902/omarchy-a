@@ -170,6 +170,28 @@ class OfflinePackage(unittest.TestCase):
         (self.package / 'source/capture.c').write_bytes(b'tampered')
         with self.assertRaisesRegex(ValueError, 'checksum'):
             self.apply(report)
+
+    def test_rescanned_routine_log_growth_does_not_invalidate_install(self):
+        self.checker.snapshot.return_value.update(kernel_current_sha256='3' * 64,
+                                                  kernel_routine_motion_lines=1)
+        report = self.preflight()
+        self.checker.snapshot.return_value.update(kernel_current_sha256='4' * 64,
+                                                  kernel_routine_motion_lines=2)
+        self.apply(report)
+        self.assertTrue(all((self.root / name).is_file() for name in pkg.PAYLOAD))
+
+    def test_log_growth_never_relaxes_other_report_bindings(self):
+        for key, value in [('kernel_sha256', '9' * 64), ('kernel_baseline_diagnostics', ['changed']),
+                           ('boot_id', 'other'), ('unexpected_field', True)]:
+            report = self.preflight()
+            old = deepcopy(self.checker.snapshot.return_value)
+            self.checker.snapshot.return_value.update(kernel_current_sha256='4' * 64,
+                                                      kernel_routine_motion_lines=2)
+            self.checker.snapshot.return_value[key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'changed after preflight'):
+                self.apply(report)
+            self.checker.snapshot.return_value = old
+        self.assertFalse(list(self.root.iterdir()))
         self.assertFalse(list(self.root.iterdir()))
 
     def test_refuses_existing_files_and_dangling_symlinks_without_overwrite(self):
@@ -349,6 +371,7 @@ class AudioKernelReview(unittest.TestCase):
     SPU = PREFIX + 'spu.cpp:898: AssertMacros:   error: 0'
     AUDIO_READY = PREFIX + 'AudioController.cpp:165: aop-audio v346.16 (debug 0x0) ready!!'
     AOP_READY = PREFIX + 'SPU_init.cpp:326: ===( AOP IS READY )==='
+    MOTION = PREFIX + 'CMSPUActivity.cpp:359: [Activity] motionState,1->4,notificationTime,12345\n'
 
     def baseline(self):
         return '\n'.join((self.BMI, self.SPU, self.AUDIO_READY, self.AOP_READY)) + '\n'
@@ -380,6 +403,33 @@ class AudioKernelReview(unittest.TestCase):
                 'apple-z2 spi0.0: touchscreen recovered\n'
                 't8010-pdm: default audio configuration changed\n')
         self.assertEqual(pkg.review_audio_kernel(text), [])
+
+    def test_reviewed_prefix_allows_only_exact_routine_motion_growth(self):
+        base = self.baseline()
+        sha = pkg.digest(base.encode())
+        for count in (0, 1, 183):
+            text = base + self.MOTION * count
+            result = pkg.review_kernel_snapshot(text, sha)
+            self.assertEqual(result['kernel_sha256'], sha)
+            self.assertEqual(result['kernel_current_sha256'], pkg.digest(text.encode()))
+            self.assertEqual(result['kernel_routine_motion_lines'], count)
+
+    def test_changed_reviewed_prefix_and_unknown_new_diagnostics_refuse(self):
+        base = self.baseline()
+        sha = pkg.digest(base.encode())
+        with self.assertRaisesRegex(ValueError, 'no longer contains'):
+            pkg.review_kernel_snapshot('New boot\n' + base, sha)
+        for extra in ('unreviewed diagnostic\n', self.MOTION.replace('359:', '360:'),
+                      self.MOTION.replace('motionState', 'differentMessage')):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, 'needs review'):
+                pkg.review_kernel_snapshot(base + extra, sha)
+
+    def test_appended_audio_fault_is_not_disguised_as_digest_mismatch(self):
+        base = self.baseline()
+        for fault in ('AOP transport fault\n', 'DMA termination failed\n',
+                      'apple-sio: timed out\n', 'retaining resources until device reset\n'):
+            with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, 'Audio/AOP fault'):
+                pkg.review_kernel_snapshot(base + self.MOTION + fault, pkg.digest(base.encode()))
 
 
 class ReadOnlyChecker(unittest.TestCase):
@@ -534,7 +584,7 @@ class ReadOnlyChecker(unittest.TestCase):
 
     def test_stale_kernel_review_and_current_fault_refuse(self):
         self.kernel += 'aop resource ownership retained\n'
-        with self.assertRaisesRegex(ValueError, 'digest changed'):
+        with self.assertRaisesRegex(ValueError, 'Audio/AOP fault'):
             self.snapshot()
         self.kernel_sha = pkg.digest(self.kernel.encode())
         with self.assertRaisesRegex(ValueError, 'Audio/AOP fault'):

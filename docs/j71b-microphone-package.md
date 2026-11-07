@@ -153,10 +153,22 @@ audio samples. Keep preflight reports private: they contain session identifiers.
 
 The preflight report is valid for at most 120 seconds, on the same package,
 boot, machine, user, raw-source identity and clean service/default state. The
-installer reruns every read-only gate immediately before writing. If normal
-new kernel messages changed the reviewed digest, stop and review a new log;
-do not edit or reuse a stale report. Close recorders and do not manipulate the
+installer reruns every read-only gate immediately before writing. It proves the
+reviewed log remains an exact prefix, scans the complete current log for audio
+faults, and permits only the precisely observed `CMSPUActivity.cpp:359` AOP
+motion-state notifications after that prefix. A changed prefix/new boot or any
+other new diagnostic requires review. Routine motion-message growth changes
+the reported current digest/count, but does not invalidate an otherwise
+unchanged preflight. All other package, boot, user, service, source, defaults and
+ownership fields remain bound. Do not edit or reuse a stale report.
+Close recorders and do not manipulate the
 session concurrently with installation/removal.
+
+A separately verified newer copy of this Python helper can inspect/install an
+existing immutable package using `--package /absolute/path/to/extracted-package`.
+It verifies every original archive member and payload receipt; it does not
+modify the bundle or require another copy of its audio plugin. Use only the
+reviewed helper from a pinned commit with its separately verified checksum.
 
 ```sh
 sudo python3 package.py install --user DESKTOP_USER --preflight "$HOME/j71b-install-preflight.json"
