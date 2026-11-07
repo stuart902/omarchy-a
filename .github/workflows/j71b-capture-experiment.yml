@@ -51,6 +51,7 @@ jobs:
           python3 fixture_config.py build/j71b-capture.so > build/fixture.conf
           # Real sessions run separately in the bounded synthetic-session job.
           python3 -m py_compile test_desktop_session.py
+          python3 test_desktop_session_unit.py
           python3 test_systemd_lifecycle.py --self-test
       - name: Test desktop lifecycle and packaging policy without a daemon
         run: python3 -m unittest discover -s tests -p 'test_j71b*.py' -v
@@ -141,9 +142,10 @@ jobs:
           apt-get install -y --no-install-recommends \
             ca-certificates git build-essential ladspa-sdk meson ninja-build \
             pkg-config python3-numpy libsndfile1-dev libglib2.0-dev liblua5.4-dev \
-            libdbus-1-dev gettext dbus-daemon dbus-bin util-linux passwd coreutils procps
+            libdbus-1-dev gettext dbus-daemon dbus-bin util-linux passwd coreutils procps \
+            pulseaudio-utils
           dpkg-query -W meson python3-numpy libsndfile1-dev libglib2.0-dev \
-            liblua5.4-dev libdbus-1-dev dbus-daemon dbus-bin
+            liblua5.4-dev libdbus-1-dev dbus-daemon dbus-bin pulseaudio-utils libpulse0
       - uses: actions/checkout@v4
         id: checkout
         with:

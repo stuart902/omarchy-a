@@ -10,6 +10,29 @@ The intended application-visible source is **J71b Microphone (conditioned)**
 record mono or stereo at their preferred rate through PipeWire's conversion.
 Neither the service nor its supervisor records audio or plays sound.
 
+## Application selection and level
+
+The source exists only while the opt-in service is running. Select **J71b
+Microphone (conditioned)** in the application's input chooser. Native PipeWire
+clients use `j71b.microphone`; PulseAudio clients use the same source name through
+the existing `pipewire-pulse` server. A successful `pw-record` capture establishes
+the native client path, not a browser or other PulseAudio application's path.
+
+The desktop audio panel already lists this exact `Audio/Source` media class.
+Choosing its input row changes the user's default source, so that is an explicit
+user choice, not an installation step. Apps with their own input chooser can
+select it without changing the global default. The service does not start at
+login or become the default automatically.
+
+Do not infer a gain regression or choose a new gain from one file's peak. Compare
+the same speech and microphone placement, with raw-source, conditioned-source
+and application volume/mute settings recorded. Compare channel peaks, DC-free
+RMS and clipping as well as listening; different phrases, distance and pauses
+can change these measurements. The desktop input slider is separate from the
+fixed DSP gain. Raising gain also raises noise, and the DSP emergency bound does
+not protect against amplification or clipping later in an application. Keep the
+candidate at +12 dB until representative evidence supports a different policy.
+
 ## Conditioning
 
 The same reviewed LADSPA component provides independent stereo 80 Hz DC
@@ -111,6 +134,14 @@ private synthetic PipeWire/WirePlumber sessions and the actual supervisor's
 `serve()` and ownership routines on x86_64 and AArch64. It does not call the
 hardware-gated production entry point or change its board checks. Check the
 current commit's `synthetic-session` jobs before claiming this coverage passed.
+
+The same isolated suite includes the pinned PipeWire PulseAudio bridge and real
+`pactl`/`parec` clients. It checks source enumeration, explicit and deliberate
+default selection, source indexes and stereo routes, mono/stereo PCM at several
+rates, expected +12 dB signal level, idle and teardown. Missing-source and
+source-removal cases cover clients that explicitly disable fallback; ordinary
+apps may intentionally follow the user's default. This protocol coverage does
+not claim a particular browser's permission UI or recording workflow was tested.
 
 The bounded disposable-container test covers recorder formats, repeated and
 concurrent consumers, default selection, idle and clean teardown, plus retained

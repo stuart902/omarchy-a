@@ -117,12 +117,19 @@ ldconfig
 
 # Check both compiled and dynamically linked versions at the paths serve()
 # actually uses. All required tools must be real installed executables.
-for binary in pipewire pw-dump pw-cli pw-link pw-cat; do
+# pipewire-pulse and protocol-pulse are built by the same pinned source, even
+# with optional features disabled. Debian supplies only the libpulse clients.
+for binary in pipewire pipewire-pulse pw-dump pw-cli pw-link pw-cat; do
   [[ -x /usr/bin/$binary ]]
   version=$(/usr/bin/"$binary" --version)
   printf '%s\n' "$version" | tee -a "$log_dir/runtime-versions.txt"
   grep -Fx "Compiled with libpipewire $pipewire_version" <<< "$version"
   grep -Fx "Linked with libpipewire $pipewire_version" <<< "$version"
+done
+test -r "/usr/lib/$multiarch/pipewire-0.3/libpipewire-module-protocol-pulse.so"
+for binary in pactl parec; do
+  [[ -x /usr/bin/$binary ]]
+  /usr/bin/"$binary" --version | tee -a "$log_dir/runtime-versions.txt"
 done
 [[ -x /usr/bin/wireplumber && -x /usr/bin/wpctl && -x /usr/bin/dbus-run-session ]]
 version=$(/usr/bin/wireplumber --version)
