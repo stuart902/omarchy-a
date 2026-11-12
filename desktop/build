@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build common AArch64 desktop components and stage the pinned Omarchy UI."""
+"""Build target desktop components and stage the pinned Omarchy UI."""
 import argparse
 import hashlib
 import json
@@ -9,7 +9,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from urllib.request import urlopen
 from snapshot_buildenv import buildenv
+from target import validate, check_elf, source_pins, check_package
 native = buildenv.native
 
 HERE = Path(__file__).resolve().parent
@@ -17,8 +19,15 @@ INPUTS = HERE / 'arm64/inputs'
 PINS = HERE / 'arm64/inputs.json'
 FILES = {
     'omafox_xpi': INPUTS / '@omafox.xpi',
-    'omacalc_package': INPUTS / 'omacalc.pkg.tar.zst',
+    'libva_v4l2_request_source': INPUTS / 'libva-v4l2_request-1.2-2-gcac6ece.tar.gz',
 }
+# Source-built on 64-bit boards only: the A10 GPU's Vulkan driver and the VA-API video bridge.
+HARDWARE_PACKAGES = {'vulkan-powervr-orchard.pkg.tar.zst': ('gpu_recipe_sha256', 'packages/vulkan-powervr-orchard'),
+                     'libva-v4l2-request.pkg.tar.zst': ('video_bridge_recipe_sha256', 'packages/libva-v4l2-request')}
+# Prebuilt on 64-bit boards: packages published by their own repositories,
+# downloaded at build time and pinned by SHA-256 in arm64/inputs.json.
+DOWNLOADS = {'omactivity.pkg.tar.zst': ('omactivity_url', 'omactivity_package'),
+             'folio.pkg.tar.zst': ('folio_url', 'folio_package')}
 KEYBOARD_PATH = 'home/tablet/.local/share/omarchy-ipad/trials/wvkbd-mobintl-v0.20-font18-special15-state'
 XPI_PATH = 'usr/lib/firefox/distribution/extensions/@omafox.xpi'
 
@@ -39,38 +48,86 @@ def recipe_sha(directory):
     return digest.hexdigest()
 
 
-def source_metadata(built):
-    pins = json.loads((HERE / 'sources.json').read_text())
-    if built['architecture'] != 'aarch64' or built['source_sha256'] != {
+def input_record(pins, architecture):
+    """The pinned inputs a desktop output was built from, as its manifest records them."""
+    names = list(FILES) if architecture == 'aarch64' else ['omafox_xpi']
+    if architecture == 'aarch64':
+        names += [key for _, key in DOWNLOADS.values()]
+    return {name: pins[name] for name in names}
+
+
+def download(url, digest, target):
+    print('Fetching:', url, flush=True)
+    with urlopen(url, timeout=120) as response, target.open('wb') as output:
+        shutil.copyfileobj(response, output)
+    if sha(target) != digest:
+        target.unlink()
+        raise ValueError(f'Downloaded package hash differs: {url}')
+
+
+def source_metadata(built, architecture='aarch64'):
+    pins = source_pins(architecture)
+    if built['architecture'] != architecture or built['source_sha256'] != {
             name: entry['sha256'] for name, entry in pins.items()}:
         raise ValueError('Source-build pins differ')
     if any(built['source_urls'][name] not in entry['urls'] for name, entry in pins.items()):
         raise ValueError('Source-build URL differs')
+    if built.get('keyboard_layout_sha256') != {name: sha(HERE / 'keyboard' / name) for name in
+                                               ('friendly-layout.py', 'apply-shift.py', 'orchard-shift.h')}:
+        raise ValueError('Keyboard layout recipe differs')
     if (built['patch_sha256'] != sha(HERE / 'keyboard/wvkbd-0.20.patch') or
             built['pkgbuild_sha256'] != sha(HERE / 'packages/omafox/PKGBUILD') or
             built.get('wlroots_recipe_sha256') != recipe_sha(HERE / 'packages/wlroots0.20')):
         raise ValueError('Source-build recipe differs')
-    if set(built['files']) != {'wvkbd-mobintl', 'omafox.pkg.tar.xz', 'wlroots0.20.pkg.tar.xz'}:
+    expected = {'wvkbd-mobintl', 'omafox.pkg.tar.xz', 'wlroots0.20.pkg.tar.xz'}
+    if architecture == 'armv7h':
+        expected.add('omacalc.pkg.tar.zst')
+        if built.get('omacalc_recipe_sha256') != recipe_sha(HERE / 'packages/omacalc'):
+            raise ValueError('Omacalc source-build recipe differs')
+    else:
+        expected.update(HARDWARE_PACKAGES)
+        for key, recipe in HARDWARE_PACKAGES.values():
+            if built.get(key) != recipe_sha(HERE / recipe):
+                raise ValueError('Hardware package source-build recipe differs: ' + recipe)
+    if set(built['files']) != expected:
         raise ValueError('Source-build files differ')
     return built['files']
 
 
-def verify(directory):
-    pins = json.loads(PINS.read_text())
+def verify(directory, architecture=None):
     meta = json.loads((directory / 'manifest.json').read_text())
+    architecture = validate(architecture or meta['architecture'])
+    pins = json.loads(PINS.read_text())
     lock = dict(line.split('=', 1) for line in (HERE / 'upstream.lock').read_text().splitlines() if '=' in line)
-    if (meta['architecture'] != pins['architecture'] or
+    if (meta['architecture'] != architecture or
             meta['omarchy_commit'] != lock['omarchy_commit'] or
-            meta['inputs'] != {name: pins[name] for name in FILES}):
+            meta['inputs'] != input_record(pins, architecture)):
         raise ValueError('Desktop input manifest differs')
-    built_files = source_metadata(meta['source_build'])
+    built_files = source_metadata(meta['source_build'], architecture)
     packages = directory / 'packages'
     if sha(packages / 'omafox.pkg.tar.xz') != built_files['omafox.pkg.tar.xz']:
         raise ValueError('Source-built Omafox package differs')
     if sha(packages / 'wlroots0.20.pkg.tar.xz') != built_files['wlroots0.20.pkg.tar.xz']:
         raise ValueError('Source-built wlroots package differs')
-    if sha(packages / 'omacalc.pkg.tar.zst') != pins['omacalc_package']:
-        raise ValueError('Signed Omacalc package differs')
+    # Omacalc: 64-bit images install upstream's signed package from its repository (system/assemble-rootfs).
+    local = ['omafox.pkg.tar.xz', 'wlroots0.20.pkg.tar.xz']
+    if architecture == 'armv7h':
+        local.append('omacalc.pkg.tar.zst')
+        if sha(packages / 'omacalc.pkg.tar.zst') != built_files['omacalc.pkg.tar.zst']:
+            raise ValueError('Source-built Omacalc package differs')
+    if architecture == 'aarch64':
+        for name, (_, key) in DOWNLOADS.items():
+            if sha(packages / name) != pins[key]:
+                raise ValueError('Downloaded package differs: ' + name)
+            local.append(name)
+    if {path.name for path in packages.iterdir()} != set(local) | (set(HARDWARE_PACKAGES) if architecture == 'aarch64' else set()):
+        raise ValueError('Desktop packages differ')
+    for name in local:
+        check_package(packages / name, architecture)
+    for name in HARDWARE_PACKAGES if architecture == 'aarch64' else ():
+        check_package(packages / name, architecture)
+        if sha(packages / name) != built_files[name]:
+            raise ValueError('Source-built hardware package differs: ' + name)
     payload = directory / 'payload'
     manifest = payload / 'arch-ipad-ui-manifest.json'
     if sha(manifest) != meta['payload_manifest_sha256']:
@@ -84,6 +141,7 @@ def verify(directory):
               if p.is_file() and not p.is_symlink()}
     if actual != set(contents) | {'arch-ipad-ui-manifest.json'}:
         raise ValueError('Desktop UI files differ from manifest')
+    check_elf(payload / KEYBOARD_PATH, architecture, 'keyboard')
     if sha(payload / KEYBOARD_PATH) != built_files['wvkbd-mobintl']:
         raise ValueError('Source-built keyboard differs')
     if sha(payload / XPI_PATH) != pins['omafox_xpi']:
@@ -91,38 +149,35 @@ def verify(directory):
     return meta
 
 
-def build(output):
+def build(output, architecture='aarch64', builder_image=None):
+    validate(architecture)
     if output.exists():
         raise ValueError('Output already exists')
     pins = json.loads(PINS.read_text())
-    for name, path in FILES.items():
+    files = FILES if architecture == 'aarch64' else {'omafox_xpi': FILES['omafox_xpi']}
+    for name, path in files.items():
         if sha(path) != pins[name]:
             raise ValueError(f'Pinned desktop input differs: {name}')
     lock = dict(line.split('=', 1) for line in (HERE / 'upstream.lock').read_text().splitlines() if '=' in line)
     commit = lock['omarchy_commit']
     if len(commit) != 40 or any(c not in '0123456789abcdef' for c in commit):
         raise ValueError('Invalid Omarchy commit pin')
-    for tool in (('git', 'gpg') if native() else ('git', 'gpg', 'podman')):
+    required = ['git', 'bsdtar']
+    if not native():
+        required.append('podman')
+    for tool in required:
         if shutil.which(tool) is None:
             raise RuntimeError(f'{tool} is required')
     (HERE / '.work').mkdir(exist_ok=True)
-    # gpg's agent socket lives in its home directory, and socket paths are
-    # limited to about 100 bytes: a deep checkout's .work/ is too long for it.
-    with tempfile.TemporaryDirectory(prefix='desktop-', dir=HERE / '.work') as temporary, \
-            tempfile.TemporaryDirectory(prefix='oa-gpg-') as gnupg:
+    with tempfile.TemporaryDirectory(prefix='desktop-', dir=HERE / '.work') as temporary:
         work = Path(temporary)
-        subprocess.run(['gpg', '--homedir', str(gnupg), '--batch', '--import',
-                        str(INPUTS / 'omarchy-pkgs.asc')], check=True, stdout=subprocess.DEVNULL)
-        result = subprocess.run(['gpg', '--homedir', str(gnupg), '--batch', '--status-fd', '1',
-                                 '--verify', str(INPUTS / 'omacalc.pkg.tar.zst.sig'),
-                                 str(FILES['omacalc_package'])], check=True, capture_output=True, text=True)
-        if not any(line.startswith('[GNUPG:] VALIDSIG ' + pins['omacalc_signer'] + ' ')
-                   for line in result.stdout.splitlines()):
-            raise ValueError('Omacalc signature has the wrong signer')
         sources = work / 'source-build'
-        subprocess.run([sys.executable, str(HERE / 'build-sources'), '--output', str(sources)], check=True)
+        options = ['--architecture', architecture]
+        if builder_image:
+            options.extend(['--builder-image', builder_image])
+        subprocess.run([sys.executable, str(HERE / 'build-sources'), '--output', str(sources), *options], check=True)
         built = json.loads((sources / 'manifest.json').read_text())
-        built_files = source_metadata(built)
+        built_files = source_metadata(built, architecture)
         for name, digest in built_files.items():
             if sha(sources / name) != digest:
                 raise ValueError(f'Source-built file differs: {name}')
@@ -141,17 +196,22 @@ def build(output):
         subprocess.run([sys.executable, str(HERE / 'stage.py'), str(result_dir / 'payload'),
                         '--upstream', str(upstream), '--keyboard', str(sources / 'wvkbd-mobintl'),
                         '--keyboard-sha256', built_files['wvkbd-mobintl'],
-                        '--omafox-xpi', str(FILES['omafox_xpi'])], check=True)
+                        '--omafox-xpi', str(FILES['omafox_xpi']), '--architecture', architecture], check=True)
         packages = result_dir / 'packages'
         packages.mkdir()
         shutil.copyfile(sources / 'omafox.pkg.tar.xz', packages / 'omafox.pkg.tar.xz')
         shutil.copyfile(sources / 'wlroots0.20.pkg.tar.xz', packages / 'wlroots0.20.pkg.tar.xz')
-        shutil.copyfile(FILES['omacalc_package'], packages / 'omacalc.pkg.tar.zst')
-        meta = {'architecture': 'aarch64', 'omarchy_commit': commit,
-                'inputs': {name: pins[name] for name in FILES}, 'source_build': built,
+        if architecture == 'armv7h':
+            shutil.copyfile(sources / 'omacalc.pkg.tar.zst', packages / 'omacalc.pkg.tar.zst')
+        for name in HARDWARE_PACKAGES if architecture == 'aarch64' else ():
+            shutil.copyfile(sources / name, packages / name)
+        for name, (url, key) in DOWNLOADS.items() if architecture == 'aarch64' else ():
+            download(pins[url], pins[key], packages / name)
+        meta = {'architecture': architecture, 'omarchy_commit': commit,
+                'inputs': input_record(pins, architecture), 'source_build': built,
                 'payload_manifest_sha256': sha(result_dir / 'payload/arch-ipad-ui-manifest.json')}
         (result_dir / 'manifest.json').write_text(json.dumps(meta, indent=2) + '\n')
-        verify(result_dir)
+        verify(result_dir, architecture)
         output.parent.mkdir(parents=True, exist_ok=True)
         os.replace(result_dir, output)
     print('Desktop output:', output)
@@ -162,12 +222,14 @@ def main():
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--output', type=Path)
     action.add_argument('--verify', type=Path)
+    parser.add_argument('--architecture', choices=('aarch64', 'armv7h'))
+    parser.add_argument('--builder-image', help='existing target compiler image')
     args = parser.parse_args()
     try:
         if args.output:
-            build(args.output.resolve())
+            build(args.output.resolve(), args.architecture or 'aarch64', args.builder_image)
         else:
-            verify(args.verify)
+            verify(args.verify, args.architecture)
             print('Verified desktop output:', args.verify)
     except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))

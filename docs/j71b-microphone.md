@@ -1,8 +1,10 @@
 # J71b conditioned microphone
 
 This adds an **opt-in, experimental desktop source**, not a completed hardware
-qualification. The normal rootfs build installs the plugin, a small Python
+qualification. The AArch64 rootfs build installs the plugin, a small Python
 supervisor and `omarchy-j71b-microphone.service`. It is not enabled at login.
+ARMv7 images do not build or install this AArch64-only payload. Cached ARMv7
+bases containing any of its payload files are rejected rather than published.
 No kernel, speaker routing, boot entries or default microphone settings change.
 
 The intended application-visible source is **J71b Microphone (conditioned)**

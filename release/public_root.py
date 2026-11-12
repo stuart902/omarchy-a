@@ -10,8 +10,9 @@ import tarfile
 import tempfile
 
 from .common import group_membership, PROJECT, SYSTEM, NETWORK_RULE
-from system.microphone import verify_archive as verify_microphone_archive
+from system.microphone import verify_archive as verify_microphone_archive, PAYLOAD as MICROPHONE_PAYLOAD
 from release.package_permissions import privileged_entries, apply as apply_package_permissions
+from release.architecture import validate, check_elf
 
 
 def sha(path):
@@ -33,19 +34,23 @@ def safe_name(name):
 def desktop_replacements():
     prefix = 'home/tablet/.local/share/omarchy-ipad/'
     replacements = {prefix + name: (PROJECT / 'desktop/shell' / name).read_bytes() for name in (
-        'shell/shell.qml', 'shell/Ui/BarIconButton.qml', 'labwc-rc.xml',
+        'shell/shell.qml', 'shell/Ui/BarIconButton.qml', 'shell/Ui/ScreenMoveRemap.qml', 'labwc-rc.xml',
         'shell/plugins/panels/power/Panel.qml', 'shell/plugins/panels/power/Model.js',
         'shell/plugins/panels/bluetooth/Model.js', 'shell/plugins/panels/bluetooth/Panel.qml',
-        'bin/omarchy-bluetooth-device')}
+        'bin/omarchy-bluetooth-device', 'bin/omarchy-keyboard',
+        'shell/plugins/panels/monitor/Panel.qml', 'shell/plugins/services/idle/Service.qml',
+        'shell/plugins/background/Background.qml')}
     replacements['home/tablet/.config/labwc/rc.xml'] = (PROJECT / 'desktop/shell/labwc-rc.xml').read_bytes()
     replacements['home/tablet/.config/labwc/autostart'] = (PROJECT / 'desktop/configuration/labwc-autostart').read_bytes()
+    replacements['usr/local/libexec/arch-ipad-rotate-output'] = (PROJECT / 'desktop/configuration/rotate-output').read_bytes()
     return replacements
 
 
-def cursor_files(directory):
+def cursor_files(directory, architecture='aarch64'):
+    validate(architecture)
     record = json.loads((directory / 'manifest.json').read_text())
     pin = json.loads((PROJECT / 'desktop/cursor/wtype.json').read_text())
-    if record.get('schema') != 1 or record.get('architecture') != 'aarch64' or record.get('source') != pin:
+    if record.get('schema') != 1 or record.get('architecture') != architecture or record.get('source') != pin:
         raise ValueError('Incompatible startup cursor helper receipt')
     files = {}
     for name, destination, mode in (
@@ -57,6 +62,8 @@ def cursor_files(directory):
         data = path.read_bytes()
         if hashlib.sha256(data).hexdigest() != record['files'].get(name):
             raise ValueError('Startup cursor helper differs from receipt: ' + name)
+        if name == 'wtype':
+            check_elf(data, architecture, 'startup cursor helper')
         files[destination] = (data, mode)
     files['etc/omarchy/cursor-helper.json'] = (json.dumps(record, sort_keys=True).encode(), 0o644)
     return files
@@ -88,13 +95,18 @@ def bluetooth_files(directory):
     return files
 
 
-def labwc_files(directory):
+def labwc_files(directory, architecture='aarch64'):
+    validate(architecture)
     record = json.loads((directory / 'manifest.json').read_text())
     pin = json.loads((PROJECT / 'desktop/labwc/source.json').read_text())
     if record.get('schema') != 1 or record.get('source') != pin:
         raise ValueError('Incompatible Labwc component receipt')
+    # Earlier AArch64 Labwc receipts predate the architecture field.
+    if record.get('architecture', 'aarch64') != architecture:
+        raise ValueError('Labwc component architecture differs from root')
     expected = {'labwc', 'LICENSE', 'source.tar.gz', '0001-cancel-super-tap-on-pointer.patch',
-                'packages.lock', 'compiler.txt', 'version.txt'}
+                '0002-bottom-edge-swipe.patch', '0003-session-transitions.patch',
+                '0004-overview.patch', 'packages.lock', 'compiler.txt', 'version.txt'}
     if record.get('files', {}).keys() != expected:
         raise ValueError('Incomplete Labwc component')
     files = {}
@@ -103,8 +115,15 @@ def labwc_files(directory):
         if path.is_symlink() or not path.is_file() or sha(path) != digest:
             raise ValueError('Labwc component differs from receipt')
         destination = 'usr/bin/labwc' if name == 'labwc' else 'usr/share/licenses/omarchy-labwc/' + name
-        files[destination] = (path.read_bytes(), 0o755 if name == 'labwc' else 0o644)
-    if record['files']['source.tar.gz'] != pin['sha256'] or record['files']['0001-cancel-super-tap-on-pointer.patch'] != pin['patch_sha256']:
+        data = path.read_bytes()
+        if name == 'labwc' and (data.startswith(b'\x7fELF') or 'architecture' in record or architecture == 'armv7h'):
+            check_elf(data, architecture, 'Labwc')
+        files[destination] = (data, 0o755 if name == 'labwc' else 0o644)
+    if (record['files']['source.tar.gz'] != pin['sha256']
+            or record['files']['0001-cancel-super-tap-on-pointer.patch'] != pin['patch_sha256']
+            or record['files']['0002-bottom-edge-swipe.patch'] != pin['edge_patch_sha256']
+            or record['files']['0003-session-transitions.patch'] != pin['transitions_patch_sha256']
+            or record['files']['0004-overview.patch'] != pin['overview_patch_sha256']):
         raise ValueError('Labwc corresponding source differs from pin')
     files['etc/omarchy/labwc-helper.json'] = (json.dumps(record, sort_keys=True).encode(), 0o644)
     return files
@@ -112,53 +131,66 @@ def labwc_files(directory):
 
 def desktop_additions():
     name = 'home/tablet/.local/share/omarchy-ipad/shell/bluetooth-pairing/shell.qml'
-    return {name: ((PROJECT / 'desktop/shell/shell/bluetooth-pairing/shell.qml').read_bytes(), 0o644)}
+    return {name: ((PROJECT / 'desktop/shell/shell/bluetooth-pairing/shell.qml').read_bytes(), 0o644),
+            'home/tablet/.local/share/omarchy-ipad/bin/omarchy-rotation-lock':
+                ((PROJECT / 'desktop/shell/bin/omarchy-rotation-lock').read_bytes(), 0o755)}
 
 
-def system_files():
+def system_files(architecture='aarch64'):
+    validate(architecture)
     additions = {}
     for path in sorted(SYSTEM.rglob('*')):
         if path.is_file() and not path.is_symlink():
             name = path.relative_to(SYSTEM).as_posix()
+            if architecture != 'aarch64' and name in MICROPHONE_PAYLOAD:
+                continue
             data = path.read_bytes()
             mode = 0o440 if name.startswith('etc/sudoers.d/') else (
-                0o755 if name.startswith('usr/libexec/') else 0o644)
+                0o755 if name.startswith(('usr/libexec/', 'etc/NetworkManager/dispatcher.d/')) else 0o644)
             additions[name] = (data, mode)
     return additions
 
 
-def access_files(tools):
+def access_files(tools, architecture='aarch64'):
     """orchard's static dropbear (SSH) and BusyBox (DHCP on usb0) for the system's own services.
 
     TOOLS: {'dropbear', 'dropbearkey', 'busybox'} paths from orchard's build cache.
     """
+    validate(architecture)
+    result = {}
     # Arch's /usr/sbin is a link to /usr/bin.
-    return {'usr/bin/dropbear': (Path(tools['dropbear']).read_bytes(), 0o755),
-            'usr/bin/dropbearkey': (Path(tools['dropbearkey']).read_bytes(), 0o755),
-            'usr/lib/orchard/busybox': (Path(tools['busybox']).read_bytes(), 0o755)}
+    for name, target in (('dropbear', 'usr/bin/dropbear'), ('dropbearkey', 'usr/bin/dropbearkey'),
+                         ('busybox', 'usr/lib/orchard/busybox')):
+        data = Path(tools[name]).read_bytes()
+        check_elf(data, architecture, name)
+        result[target] = (data, 0o755)
+    return result
 
 
 def build(base, base_receipt, outdir, release, cursor_tools, bluetooth_tools=None, labwc_tools=None, tools=None,
-          splash=None):
+          splash=None, architecture='aarch64'):
     """The root image for every platform: no kernel, DTBs or modules (orchard's layer has them)."""
+    validate(architecture)
     if outdir.exists():
         raise ValueError('Choose a new release output directory')
     record = json.loads(base_receipt.read_text())
+    if record.get('architecture', 'aarch64') != architecture:
+        raise ValueError('Base root architecture differs from selected architecture')
     if base.is_symlink() or base.stat().st_size != record['bytes'] or sha(base) != record['sha256']:
         raise ValueError('Base root differs from receipt')
     # Cached bases must contain the current native DSP, not merely a valid tar hash.
-    verify_microphone_archive(base)
+    verify_microphone_archive(base, architecture=architecture)
     privileges = privileged_entries(base)
     privileged_digests = {}
-    additions = cursor_files(cursor_tools)
+    additions = cursor_files(cursor_tools, architecture)
     additions.update(bluetooth_files(bluetooth_tools or PROJECT / 'out/desktop/bluetooth-tools'))
-    additions.update(labwc_files(labwc_tools or PROJECT / 'out/desktop/labwc-tools'))
+    additions.update(labwc_files(labwc_tools or PROJECT / 'out/desktop/labwc-tools', architecture))
     desktop_extra = desktop_additions()
     additions.update(desktop_extra)
     additions['etc/omarchy/package-privileges.json'] = (json.dumps(privileges, sort_keys=True).encode(), 0o644)
-    additions.update(system_files())
+    additions.update(system_files(architecture))
     if tools:
-        additions.update(access_files(tools))
+        additions.update(access_files(tools, architecture))
     if splash:
         # orchard launch paints it before the kernel (orchard docs/boot-contract.md).
         additions['usr/share/orchard/splash'] = (Path(splash).read_bytes(), 0o644)
@@ -170,14 +202,16 @@ def build(base, base_receipt, outdir, release, cursor_tools, bluetooth_tools=Non
     replacements = desktop_replacements()
     outdir.parent.mkdir(parents=True, exist_ok=True)
     seen, directories, expanded, count = set(), set(), 0, 0
+    base_stamp = None
     with tempfile.TemporaryDirectory(dir=outdir.parent, prefix='.root-') as temp:
         temporary = Path(temp)
         archive = temporary / 'rootfs.tar.zst'
         with archive.open('wb') as raw, subprocess.Popen(
-                # -19 --long: 39% smaller than -1 for the same root (704 vs 1154 MiB), so
-                # 39% less to send over the device's ~12 MB/s USB link; decompression
-                # stays fast and needs no option (the window stays at zstd's default limit).
-                ['zstd', '-T0', '-19', '--long', '--check', '-q', '-c'], stdin=subprocess.PIPE, stdout=raw) as compressor:
+                # zstd's default level: this archive only carries the root to the block
+                # image (orchard.image.root_image), the audit and the smoke test; it is
+                # never published. What the device downloads is root.blocks.zst, compressed
+                # there. -19 --long here cost about five and a half minutes per build.
+                ['zstd', '-T0', '--check', '-q', '-c'], stdin=subprocess.PIPE, stdout=raw) as compressor:
             with tarfile.open(fileobj=compressor.stdin, mode='w|') as target:
                 def add(member, data=None):
                     nonlocal expanded, count
@@ -207,6 +241,12 @@ def build(base, base_receipt, outdir, release, cursor_tools, bluetooth_tools=Non
                         if member.name == 'lib' and (not member.issym() or member.linkname != 'usr/lib'):
                             raise ValueError('Base must link lib to usr/lib')
                         data = source.extractfile(member).read() if member.isfile() else None
+                        if member.name == 'etc/ipadlinux/release':
+                            if data is None or len(data) > 256:
+                                raise ValueError('Invalid base release stamp')
+                            base_stamp = data.decode().rstrip('\n')
+                            if record.get('release') is not None and data != (record['release'] + '\n').encode():
+                                raise ValueError('Base release stamp differs from its receipt')
                         if member.name in ('etc/group', 'etc/gshadow'):
                             data = group_membership(data, shadow=member.name == 'etc/gshadow')
                         if member.name in replacements:
@@ -246,7 +286,7 @@ def build(base, base_receipt, outdir, release, cursor_tools, bluetooth_tools=Non
                 # A login on orchard's USB serial console as well, like minimal-linux.
                 wants = [('multi-user.target.wants/' + unit, unit) for unit in
                          ('omarchy-pacman-init.service', 'orchard-usb-network.service', 'orchard-ssh.service',
-                          'omarchy-powerd.service')]
+                          'omarchy-powerd.service', 'omarchy-wifi-country.service')]
                 wants.append(('getty.target.wants/serial-getty@ttyGS0.service', 'serial-getty@.service'))
                 # BindsTo stops the USB network when usb0 goes; usb0's return starts it again
                 wants.append(('sys-subsystem-net-devices-usb0.device.wants/orchard-usb-network.service',
@@ -264,9 +304,12 @@ def build(base, base_receipt, outdir, release, cursor_tools, bluetooth_tools=Non
                     'arch-ipad-ui-manifest.json'}
         if not required <= seen or not privileges.keys() <= seen or not replacements.keys() <= seen:
             raise ValueError('Incomplete public root or privileged package metadata')
-        receipt = {'schema': 2, 'kind': 'rootfs', 'release': release,
+        if record.get('release') is not None and base_stamp is None:
+            raise ValueError('Base release stamp is missing')
+        receipt = {'schema': 2, 'kind': 'rootfs', 'release': release, 'architecture': architecture,
                    'bytes': archive.stat().st_size, 'sha256': sha(archive), 'compression': 'zstd',
-                   'expanded_bytes': expanded, 'members': count, 'base_sha256': record['sha256']}
+                   'expanded_bytes': expanded, 'members': count, 'base_sha256': record['sha256'],
+                   'stamps': {'base': base_stamp, 'orchard': release}}
         (temporary / 'rootfs.json').write_text(json.dumps(receipt, indent=2) + '\n')
         os.replace(temporary, outdir)
     return receipt
@@ -277,8 +320,10 @@ def main():
     for name in ('base', 'base-receipt', 'outdir', 'cursor-tools', 'bluetooth-tools', 'labwc-tools'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--release', required=True)
+    parser.add_argument('--architecture', choices=('aarch64', 'armv7h'), default='aarch64')
     args = parser.parse_args()
-    print(json.dumps(build(args.base, args.base_receipt, args.outdir, args.release, args.cursor_tools, args.bluetooth_tools, args.labwc_tools), indent=2))
+    print(json.dumps(build(args.base, args.base_receipt, args.outdir, args.release, args.cursor_tools,
+                           args.bluetooth_tools, args.labwc_tools, architecture=args.architecture), indent=2))
 
 
 if __name__ == '__main__':

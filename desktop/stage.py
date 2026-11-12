@@ -10,8 +10,12 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import sys
 
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from target import check_elf
 PORT = HERE / "shell"
 CONFIG = HERE / "configuration"
 INPUTS = json.loads((HERE / 'arm64/inputs.json').read_text())
@@ -36,12 +40,14 @@ def main():
     parser.add_argument("--keyboard", type=Path, required=True, help="built wvkbd-mobintl binary")
     parser.add_argument("--keyboard-sha256", required=True, help="hash from the source-build manifest")
     parser.add_argument("--omafox-xpi", type=Path, required=True, help="signed Omafox extension")
+    parser.add_argument("--architecture", default="aarch64", choices=("aarch64", "armv7h"))
     args = parser.parse_args()
     FORK, KEYBOARD, XPI = args.upstream, args.keyboard, args.omafox_xpi
     target = args.target.resolve()
     if target.exists() or target == Path("/") or target.is_relative_to(Path("/Volumes")):
         parser.error("target must be a new local staging directory, not an existing/mounted volume")
     checked(KEYBOARD, args.keyboard_sha256)
+    check_elf(KEYBOARD, args.architecture, "keyboard")
     checked(XPI, XPI_SHA)
     source = target / "home/tablet/.local/share/omarchy-ipad"
     # Copy shell sources and immutable upstream theme assets.
@@ -98,14 +104,21 @@ def main():
         CONFIG / "rotate-output": target / "usr/local/libexec/arch-ipad-rotate-output",
         CONFIG / "touch-output": target / "usr/local/libexec/arch-ipad-touch-output",
         CONFIG / "login-session": target / "usr/local/libexec/arch-ipad-login-session",
-        CONFIG / "org.kde.dolphin.desktop": target / "home/tablet/.local/share/applications/org.kde.dolphin.desktop",
         HERE / "greeter/greetd.toml": target / "etc/greetd/config.toml",
         HERE / "greeter/greetd-seatd.conf": target / "etc/systemd/system/greetd.service.d/seatd.conf",
         CONFIG / "networkmanager.rules": target / "etc/polkit-1/rules.d/40-arch-ipad-networkmanager.rules",
         FORK / "applications/foot.desktop": target / "usr/local/share/applications/foot.desktop",
         XPI: target / "usr/lib/firefox/distribution/extensions/@omafox.xpi",
         CONFIG / "firefox-policies.json": target / "usr/lib/firefox/distribution/policies.json",
+        # Session-dependent Firefox defaults (hardware video decoding), through AutoConfig.
+        CONFIG / "firefox-autoconfig.js": target / "usr/lib/firefox/defaults/pref/omarchy-a.js",
+        CONFIG / "firefox.cfg": target / "usr/lib/firefox/omarchy-a.cfg",
     }
+    # The files app: 64-bit boards get Files (Folio with touch mode), whose
+    # package brings its own launcher entry. It has no ARMv7 build, so those
+    # boards keep Dolphin, with this entry for its wrapper.
+    if args.architecture == "armv7h":
+        mapping[CONFIG / "org.kde.dolphin.desktop"] = target / "home/tablet/.local/share/applications/org.kde.dolphin.desktop"
     for src, dst in mapping.items():
         copy(src, dst)
     # Branding is static; kernel, memory and CPU information use live probes.
@@ -122,6 +135,12 @@ def main():
     (target / "usr/local/libexec/arch-ipad-rotate-output").chmod(0o755)
     (target / "usr/local/libexec/arch-ipad-touch-output").chmod(0o755)
     (target / "usr/local/libexec/arch-ipad-login-session").chmod(0o755)
+    # The base overlay preserves directory modes. Set the target layout
+    # explicitly so a private build umask cannot block the tablet session.
+    home = target / "home/tablet"
+    for path in [target, *target.rglob("*")]:
+        if not path.is_symlink() and path.is_dir():
+            path.chmod(0o700 if path.is_relative_to(home) else 0o755)
     # Record a content hash for each staged payload file.
     files = sorted(p for p in target.rglob("*") if p.is_file() and not p.is_symlink())
     manifest = {str(p.relative_to(target)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}

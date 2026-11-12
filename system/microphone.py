@@ -12,6 +12,9 @@ PROJECT = Path(__file__).resolve().parents[1]
 SOURCE = 'experiments/j71b-capture/capture.c'
 PLUGIN = 'usr/lib/omarchy-j71b-microphone/j71b-capture.so'
 RECEIPT = 'etc/omarchy/j71b-microphone.json'
+RUNTIME = 'usr/lib/omarchy-j71b-microphone/desktop_mic.py'
+UNIT = 'usr/lib/systemd/user/omarchy-j71b-microphone.service'
+PAYLOAD = (PLUGIN, RECEIPT, RUNTIME, UNIT)
 
 
 def digest(data):
@@ -38,17 +41,22 @@ def verify_files(files, project=PROJECT):
         raise ValueError('Stale or corrupt J71b microphone plugin receipt; rebuild the base')
 
 
-def verify_archive(archive, project=PROJECT):
+def verify_archive(archive, project=PROJECT, architecture='aarch64'):
+    if architecture not in ('aarch64', 'armv7h'):
+        raise ValueError('Unsupported microphone target architecture: ' + architecture)
     files = {}
     with tarfile.open(archive, 'r|gz') as source:
         for member in source:
             name = str(PurePosixPath(member.name))
+            if architecture != 'aarch64' and name in PAYLOAD:
+                raise ValueError('ARMv7 base must not contain J71b microphone payload: ' + name)
             if name not in (PLUGIN, RECEIPT):
                 continue
             if name in files or not member.isfile() or member.size > 16 * 1024 * 1024:
                 raise ValueError('Invalid J71b microphone archive member: ' + name)
             files[name] = source.extractfile(member).read()
-    verify_files(files, project)
+    if architecture == 'aarch64':
+        verify_files(files, project)
 
 
 def build(root, project=PROJECT):

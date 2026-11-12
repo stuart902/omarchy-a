@@ -24,7 +24,7 @@ def plugin_files():
 
 
 class MicrophonePackaging(unittest.TestCase):
-    def verify(self, files):
+    def verify(self, files, architecture='aarch64'):
         with tempfile.TemporaryDirectory() as directory:
             archive = Path(directory) / 'base.gz'
             with tarfile.open(archive, 'w:gz') as target:
@@ -32,10 +32,49 @@ class MicrophonePackaging(unittest.TestCase):
                     member = tarfile.TarInfo('./' + name)
                     member.size = len(data)
                     target.addfile(member, io.BytesIO(data))
-            mic.verify_archive(archive)
+            mic.verify_archive(archive, architecture=architecture)
 
     def test_current_plugin_and_receipt_are_accepted(self):
         self.verify(plugin_files())
+
+    def test_armv7_base_does_not_require_arm64_plugin(self):
+        self.verify({}, 'armv7h')
+
+    def test_armv7_base_rejects_each_stray_microphone_payload(self):
+        for name in mic.PAYLOAD:
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'ARMv7 base'):
+                self.verify({name: b'stray payload'}, 'armv7h')
+
+    def test_unknown_architecture_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'Unsupported microphone target'):
+            self.verify({}, 'x86_64')
+
+    def test_overlay_only_adds_microphone_to_arm64(self):
+        from release.public_root import system_files
+        arm64, armv7 = system_files('aarch64'), system_files('armv7h')
+        for name in (mic.RUNTIME, mic.UNIT):
+            self.assertIn(name, arm64)
+            self.assertNotIn(name, armv7)
+        self.assertEqual(set(arm64) - set(armv7), {mic.RUNTIME, mic.UNIT})
+        # Architecture gating must not change upstream speaker routing.
+        speakers = 'etc/wireplumber/wireplumber.conf.d/61-omarchy-a-j71b-speakers.conf'
+        self.assertEqual(arm64[speakers], armv7[speakers])
+
+    def test_armv7_release_reaches_dependencies_without_microphone(self):
+        from release import public_root
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive, receipt = root / 'base.gz', root / 'base.json'
+            with tarfile.open(archive, 'w:gz'):
+                pass
+            receipt.write_text(json.dumps({'architecture': 'armv7h',
+                'bytes': archive.stat().st_size, 'sha256': mic.digest(archive.read_bytes())}))
+            with patch.object(public_root, 'privileged_entries', return_value={}), \
+                    patch.object(public_root, 'cursor_files', side_effect=RuntimeError('reached cursor')):
+                with self.assertRaisesRegex(RuntimeError, 'reached cursor'):
+                    public_root.build(archive, receipt, root / 'output', 'test', root,
+                                      architecture='armv7h')
+            self.assertFalse((root / 'output').exists())
 
     def test_old_base_and_missing_members_are_rejected(self):
         for files in ({}, {mic.PLUGIN: plugin_files()[mic.PLUGIN]},
