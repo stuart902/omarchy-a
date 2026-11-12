@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 
 from .common import group_membership, PROJECT, SYSTEM, NETWORK_RULE
+from system.microphone import verify_archive as verify_microphone_archive, PAYLOAD as MICROPHONE_PAYLOAD
 from release.package_permissions import privileged_entries, apply as apply_package_permissions
 from release.architecture import validate, check_elf
 
@@ -135,11 +136,14 @@ def desktop_additions():
                 ((PROJECT / 'desktop/shell/bin/omarchy-rotation-lock').read_bytes(), 0o755)}
 
 
-def system_files():
+def system_files(architecture='aarch64'):
+    validate(architecture)
     additions = {}
     for path in sorted(SYSTEM.rglob('*')):
         if path.is_file() and not path.is_symlink():
             name = path.relative_to(SYSTEM).as_posix()
+            if architecture != 'aarch64' and name in MICROPHONE_PAYLOAD:
+                continue
             data = path.read_bytes()
             mode = 0o440 if name.startswith('etc/sudoers.d/') else (
                 0o755 if name.startswith(('usr/libexec/', 'etc/NetworkManager/dispatcher.d/')) else 0o644)
@@ -174,6 +178,8 @@ def build(base, base_receipt, outdir, release, cursor_tools, bluetooth_tools=Non
         raise ValueError('Base root architecture differs from selected architecture')
     if base.is_symlink() or base.stat().st_size != record['bytes'] or sha(base) != record['sha256']:
         raise ValueError('Base root differs from receipt')
+    # Cached bases must contain the current native DSP, not merely a valid tar hash.
+    verify_microphone_archive(base, architecture=architecture)
     privileges = privileged_entries(base)
     privileged_digests = {}
     additions = cursor_files(cursor_tools, architecture)
@@ -182,7 +188,7 @@ def build(base, base_receipt, outdir, release, cursor_tools, bluetooth_tools=Non
     desktop_extra = desktop_additions()
     additions.update(desktop_extra)
     additions['etc/omarchy/package-privileges.json'] = (json.dumps(privileges, sort_keys=True).encode(), 0o644)
-    additions.update(system_files())
+    additions.update(system_files(architecture))
     if tools:
         additions.update(access_files(tools, architecture))
     if splash:

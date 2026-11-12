@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from orchard.hardware import ROOT
+from test_j71b_packaging import plugin_files
 
 PROJECT = Path(__file__).resolve().parents[1]
 HARDWARE = ROOT
@@ -47,6 +48,7 @@ class ImageProduction(unittest.TestCase):
                       'etc/gshadow': b'seat:!*::\nvideo:!*::\ninput:!*::\n'})
         files['arch-ipad-ui-manifest.json'] = json.dumps({
             name: hashlib.sha256(files[name]).hexdigest() for name in replacements}).encode()
+        files.update(plugin_files())
         parents = {str(p) for name in files for p in PurePosixPath(name).parents if str(p) != '.'}
         data = stream([(name, 'dir', 0o755) for name in sorted(parents)] +
                       [(name, 'file', value) for name, value in files.items()] + [('lib', 'symlink', 'usr/lib')])
@@ -91,7 +93,8 @@ class ImageProduction(unittest.TestCase):
 
     def test_a_base_with_kernel_modules_is_refused(self):
         from release import public_root
-        data = stream([('usr/lib/modules/6.1-generic/modules.dep', 'file', b'')])
+        data = stream([('usr/lib/modules/6.1-generic/modules.dep', 'file', b'')] +
+                      [(name, 'file', value) for name, value in plugin_files().items()])
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             base, receipt = root / 'base.gz', root / 'base.json'

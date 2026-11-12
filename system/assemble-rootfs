@@ -21,6 +21,9 @@ case "$architecture" in
 esac
 [[ $(uname -m) == "$expected_machine" && $EUID == 0 ]] || { echo "Requires an $expected_machine Arch Linux ARM build environment as root" >&2; exit 1; }
 for cmd in pacman useradd usermod systemctl tar bsdtar python3; do command -v "$cmd" >/dev/null || { echo "Missing $cmd" >&2; exit 1; }; done
+if [[ $architecture == aarch64 ]]; then
+  command -v gcc >/dev/null || { echo "Missing gcc" >&2; exit 1; }
+fi
 project=$(cd "$(dirname "$0")/.." && pwd)
 root=$(realpath -m -- "$root")
 output=$(realpath -m -- "$output")
@@ -98,6 +101,10 @@ usermod --root "$root" --append --groups seat,video,input greeter
 # package tree clears setuid/setgid bits and file capabilities (including sudo).
 cp -a --no-preserve=ownership "$desktop/payload/." "$root/"
 chown -R 1000:1000 "$root/home/tablet"
+# Build on the host, keeping the compiler and LADSPA headers out of the image.
+if [[ $architecture == aarch64 ]]; then
+  python3 "$project/system/microphone.py" --root "$root"
+fi
 install -d "$root/etc/systemd/system"
 # Suspend stays possible; orchard allows it per board. Hibernation never is.
 for unit in hibernate hybrid-sleep suspend-then-hibernate; do

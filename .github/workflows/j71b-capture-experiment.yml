@@ -1,0 +1,226 @@
+name: J71b capture processing experiment
+on:
+  pull_request:
+    paths:
+      - 'experiments/j71b-capture/**'
+      - 'system/overlay/usr/lib/omarchy-j71b-microphone/**'
+      - 'system/overlay/usr/lib/systemd/user/omarchy-j71b-microphone.service'
+      - 'system/microphone.py'
+      - 'system/build-rootfs'
+      - 'system/assemble-rootfs'
+      - 'system/install-toolchain'
+      - 'system/packages.txt'
+      - 'release/public_root.py'
+      - 'tools/build.py'
+      - 'tools/package_j71b_microphone.py'
+      - 'tools/j71b_microphone_package.py'
+      - 'tests/test_j71b*'
+      - 'docs/j71b-microphone.md'
+      - 'docs/j71b-microphone-package.md'
+      - '.github/workflows/j71b-capture-experiment.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  headless-spa:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+    timeout-minutes: 10
+    steps:
+      - name: Install isolated test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential ladspa-sdk python3-numpy nodejs \
+            libpipewire-0.3-0t64 libspa-0.2-modules
+          dpkg-query -W libpipewire-0.3-0t64 libspa-0.2-modules ladspa-sdk
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build and exercise the real installed SPA graph
+        working-directory: experiments/j71b-capture
+        run: |
+          make test
+          make sanitize
+          python3 spa_graph.py
+          python3 fixture_config.py build/j71b-capture.so > build/fixture.conf
+          # Real sessions run separately in the bounded synthetic-session job.
+          python3 -m py_compile test_desktop_session.py
+          python3 test_desktop_session_unit.py
+          node test_browser_test.cjs
+          python3 test_systemd_lifecycle.py --self-test
+      - name: Test desktop lifecycle and packaging policy without a daemon
+        run: python3 -m unittest discover -s tests -p 'test_j71b*.py' -v
+      - name: Verify native rootfs microphone compilation
+        if: matrix.runner == 'ubuntu-24.04-arm'
+        run: |
+          python3 system/microphone.py --root experiments/j71b-capture/build/staged-root
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          from system.microphone import PLUGIN, RECEIPT, verify_files
+          root = Path('experiments/j71b-capture/build/staged-root')
+          verify_files({name: (root / name).read_bytes() for name in (PLUGIN, RECEIPT)})
+          print('Native AArch64 rootfs plugin and source receipt verified')
+          PYCODE
+      - name: Package opt-in native ARM hardware test
+        if: matrix.runner == 'ubuntu-24.04-arm'
+        working-directory: experiments/j71b-capture
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(uname -m)" = aarch64
+          printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+          mkdir -p build/j71b-microphone-test
+          cp build/j71b-capture.so build/test-capture hardware_test.py \
+            HARDWARE-TEST.md capture.c test_capture.c build/j71b-microphone-test/
+          {
+            printf 'Repository: https://github.com/stuart902/omarchy-a\n'
+            printf 'Source commit: %s\n' "$SOURCE_COMMIT"
+            printf 'Architecture: %s\n' "$(uname -m)"
+            printf 'Build environment: Debian trixie; native ARM64\n'
+            printf 'No tablet or systemd user-manager qualification is included.\n'
+            cc --version | head -1
+            ldd --version | head -1
+          } > build/j71b-microphone-test/BUILD-INFO.txt
+          (cd build/j71b-microphone-test && sha256sum \
+            j71b-capture.so test-capture hardware_test.py HARDWARE-TEST.md \
+            capture.c test_capture.c BUILD-INFO.txt > SHA256SUMS)
+          tar -C build -czf build/j71b-microphone-test-aarch64.tar.gz j71b-microphone-test
+      - uses: actions/upload-artifact@v4
+        if: matrix.runner == 'ubuntu-24.04-arm'
+        with:
+          name: j71b-microphone-test-aarch64
+          path: experiments/j71b-capture/build/j71b-microphone-test-aarch64.tar.gz
+          if-no-files-found: error
+  upstream-spa:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+    timeout-minutes: 20
+    steps:
+      - name: Install source-build test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential ladspa-sdk python3-numpy \
+            libpipewire-0.3-0t64 libspa-0.2-modules meson ninja-build pkg-config
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build pinned PipeWire 1.6.10 and run the real graph tests
+        run: |
+          git clone --depth 1 --branch 1.6.10 \
+            https://github.com/PipeWire/pipewire.git "$RUNNER_TEMP/pipewire-1.6.10"
+          bash experiments/j71b-capture/test_pipewire_1_6.sh \
+            "$RUNNER_TEMP/pipewire-1.6.10" "$RUNNER_TEMP/pipewire-build"
+  synthetic-session:
+    # Nondeploying synthetic audio only. No host devices/sockets, privileges,
+    # secrets, desktop session, or systemd user manager are supplied.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+    timeout-minutes: 25
+    steps:
+      - name: Install source-build and private-session dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/j71b-desktop-session-logs"
+          exec > >(tee "$RUNNER_TEMP/j71b-desktop-session-logs/dependencies.log") 2>&1
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential ladspa-sdk meson ninja-build \
+            pkg-config python3-numpy libsndfile1-dev libglib2.0-dev liblua5.4-dev \
+            libdbus-1-dev gettext dbus-daemon dbus-bin util-linux passwd coreutils procps \
+            pulseaudio-utils
+          dpkg-query -W meson python3-numpy libsndfile1-dev libglib2.0-dev \
+            liblua5.4-dev libdbus-1-dev dbus-daemon dbus-bin pulseaudio-utils libpulse0
+      - uses: actions/checkout@v4
+        id: checkout
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build pinned engines and exercise the production supervisor
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          CHECKOUT_COMMIT: ${{ steps.checkout.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$CHECKOUT_COMMIT" = "$SOURCE_COMMIT"
+          printf 'Repository commit: %s\n' "$SOURCE_COMMIT" \
+            > "$RUNNER_TEMP/j71b-desktop-session-logs/checkout.txt"
+          bash experiments/j71b-capture/ci_desktop_session.sh \
+            "$RUNNER_TEMP/j71b-desktop-session" \
+            "$RUNNER_TEMP/j71b-desktop-session-logs"
+      - name: Stage diagnostic logs, never audio samples
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/j71b-desktop-session-logs"
+          destination="$GITHUB_WORKSPACE/experiments/j71b-capture/build/session-diagnostics"
+          mkdir -p "$destination"
+          if [ -d "$source" ]; then
+            cd "$source"
+            find . -type f \( -name '*.log' -o -name '*.txt' -o -name '*.json' \) -print0 |
+              while IFS= read -r -d '' diagnostic; do
+                mkdir -p "$destination/$(dirname "$diagnostic")"
+                cp -- "$diagnostic" "$destination/$diagnostic"
+              done
+          fi
+      - name: Preserve diagnostic logs, never audio samples
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: j71b-synthetic-session-${{ matrix.runner }}
+          path: experiments/j71b-capture/build/session-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+  systemd-lifecycle:
+    # A real, ALREADY RUNNING user manager on a disposable hosted VM. This
+    # uses only inert process fixtures, never audio/USB interfaces or a real
+    # PipeWire service. No sudo, linger, manager bootstrap, container privilege
+    # flags, host mounts or security-setting changes are permitted. Absence of
+    # the existing manager is a reported blocker, not a reason to create one.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        id: checkout
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Qualify existing user-manager lifecycle with synthetic processes
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          CHECKOUT_COMMIT: ${{ steps.checkout.outputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$CHECKOUT_COMMIT" = "$SOURCE_COMMIT"
+          python3 experiments/j71b-capture/test_systemd_lifecycle.py --self-test
+          timeout --signal=TERM --kill-after=10s 180s \
+            python3 experiments/j71b-capture/test_systemd_lifecycle.py \
+              --run-existing-user-manager \
+              --output-directory "$RUNNER_TEMP/j71b-systemd-lifecycle"
+      - name: Preserve lifecycle diagnostics, never audio
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: j71b-systemd-lifecycle-ubuntu-24.04
+          path: ${{ runner.temp }}/j71b-systemd-lifecycle
+          if-no-files-found: warn
+          retention-days: 7
