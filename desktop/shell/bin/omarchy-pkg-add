@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# omarchy:summary=Install and verify packages using normal sudo authentication
+# omarchy:args=<package...>
+
+set -uo pipefail
+
+if (($# == 0)); then
+  echo 'Usage: omarchy-pkg-add <package...>' >&2
+  exit 2
+fi
+
+all_present=1
+for package in "$@"; do
+  if ! pacman -Q -- "$package" >/dev/null 2>&1; then all_present=0; fi
+done
+((all_present)) && exit 0
+
+# --noconfirm is the upstream package-confirmation policy, not a sudo bypass.
+sudo pacman -S --noconfirm --needed -- "$@" || exit "$?"
+for package in "$@"; do
+  if ! pacman -Q -- "$package"; then
+    printf 'Package verification failed: %s\n' "$package" >&2
+    exit 1
+  fi
+done

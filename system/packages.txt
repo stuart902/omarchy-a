@@ -15,6 +15,9 @@ diffutils
 libvips
 ffmpegthumbnailer
 foot
+# Generic installer desktop launch and terminal-startup error notifications.
+gtk3
+libnotify
 ttf-dejavu
 ttf-jetbrains-mono-nerd
 ttf-nerd-fonts-symbols
